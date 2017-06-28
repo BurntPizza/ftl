@@ -4,83 +4,140 @@ use pg::prelude::*;
 use std::cmp::max;
 use std::fmt::{self, Display, Formatter};
 
+use std::collections::{HashMap, HashSet};
+
 use ::*;
 
 #[derive(Debug)]
 pub struct Code {
     entry: NodeIndex,
     ir: Graph<Ir, Edge>,
+    fns: HashMap<String, NodeIndex>,
+    label_counter: usize,
 }
-
 impl Code {
+    fn make_fn_available<S>(&mut self, s: S, f: fn() -> Ir)
+    where
+        S: Into<String>,
+    {
+        let s = s.into();
+
+        if !self.fns.contains_key(&s) {
+            let idx = self.ir.add_node(f());
+            self.fns.insert(s, idx);
+        }
+    }
+
     pub fn assemble(&self) -> String {
-        let g = &self.ir;
-        let mut p = String::from("\tbits 64\n\tglobal _start\n");
-        let mut data = String::from("\tsection .data\n");
-        let mut text = String::from("\tsection .text\n_start:\n");
-        let mut i = self.entry;
+        let mut p = StringBuilder::new();
 
-        loop {
-            let n = &g[i];
+        p.indent();
+        p.line("bits 64");
+        p.line("global _start");
 
-            match *n {
-                Ir::BB(ref ins) => {
-                    for inst in ins {
-                        match *inst {
-                            Ins::AddImmI64(reg, val) => text.push_str(&format!("\tadd {}, {}\n", reg, val)),
-                            Ins::SubImmI64(reg, val) => text.push_str(&format!("\tsub {}, {}\n", reg, val)),
-                            Ins::Push(reg) => text.push_str(&format!("\tpush {}\n", reg)),
-                            Ins::LoadImmI64(reg, val) => {
-                                text.push_str(&format!("\tmov {}, {}\n", reg, val));
-                            }
-                            Ins::MovRegReg(dest, src) => {
-                                text.push_str(&format!("\tmov {}, {}\n", dest, src));
-                            }
-                            Ins::Store{base, offset, src} => {
-                                text.push_str(&format!("\tmov [{} + {}], {}\n", base, offset, src));
-                            }
-                            Ins::Syscall => text.push_str("\tsyscall\n"),
-                        }
-                    }
+        let mut data = StringBuilder::new();
+        data.indent();
+        data.line("section .data");
+
+        let mut text = StringBuilder::new();
+        text.indent();
+        text.line("section .text");
+
+        let mut stack = vec![self.entry];
+        let mut visited = HashSet::new();
+
+        while let Some(i) = stack.pop() {
+            if visited.contains(&i) {
+                continue;
+            }
+
+            visited.insert(i);
+
+            let node = &self.ir[i];
+
+            match *node {
+                Ir::BB(ref bb) => {
+                    self.compile_bb(bb, &mut text);
                 }
             }
 
-            if i == self.entry {
-                let s = format!(
-                    "\tmov rax, 60\n\
-                     \txor rdi, rdi\n\
-                     \tsyscall\n"
-                );
-                text.push_str(&s);
-            }
-
-            if g.edges(i).count() == 0 {
-                break;
-            } else {
-                unimplemented!()
+            for i in self.ir.edges(i).filter(|e| *e.weight() == Edge::DependsOn) {
+                stack.push(i.target());
             }
         }
 
-        p += &*data;
-        p += &*text;
+        let mut p = p.into();
+        p += &*data.into();
+        p += &*text.into();
         p
+    }
+
+    fn compile_bb(&self, bb: &BB, block: &mut StringBuilder) {
+        let BB { ref label, ref ins } = *bb;
+        block.label(label);
+        for ins in ins {
+            self.compile_ins(*ins, block);
+        }
+    }
+
+    fn compile_ins(&self, ins: Ins, block: &mut StringBuilder) {
+        match ins {
+            Ins::AddImmI64(reg, val) => {
+                block.line(format!("add {}, {}", reg, val));
+            }
+            Ins::SubImmI64(reg, val) => {
+                block.line(format!("sub {}, {}", reg, val));
+            }
+            Ins::Push(reg) => {
+                block.line(format!("push {}", reg));
+            }
+            Ins::LoadImmI64(reg, val) => {
+                block.line(format!("mov {}, {}", reg, val));
+            }
+            Ins::MovRegReg(dest, src) => {
+                block.line(format!("mov {}, {}", dest, src));
+            }
+            Ins::Store { base, offset, src } => {
+                block.line(format!("mov [{} + {}], {}", base, offset, src));
+            }
+            Ins::Syscall => {
+                block.line("syscall");
+            }
+            Ins::Call(s) => {
+                block.line(format!("call {}", s));
+            }
+            Ins::Ret => {
+                block.line("ret");
+            }
+            Ins::Jmp(s) => {
+                block.line(format!("jmp {}", s));
+            }
+            Ins::Xor(dest, src) => {
+                block.line(format!("xor {}, {}", dest, src));
+            }
+        }
     }
 }
 
-#[derive(Debug)]
+
+#[derive(Debug, PartialEq)]
 enum Edge {
-    Jmp,
+    DependsOn,
 }
 
 #[derive(Debug, Copy, Clone)]
 pub enum Ins {
     LoadImmI64(Reg, i64),
-    Store{base:Reg, offset:i64, src:Reg},
+    Store { base: Reg, offset: i64, src: Reg },
     Push(Reg),
     AddImmI64(Reg, i64),
     SubImmI64(Reg, i64),
     MovRegReg(Reg, Reg),
     Syscall,
+    Call(&'static str),
+    Ret,
+    Jmp(&'static str),
+    Xor(Reg, Reg),
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -118,21 +175,48 @@ impl Display for Reg {
 
 #[derive(Debug)]
 pub enum Ir {
-    BB(Vec<Ins>),
+    BB(BB),
+}
+
+#[derive(Debug)]
+pub struct BB {
+    label: String,
+    ins: Vec<Ins>,
 }
 
 pub fn compile(p: &Program) -> Code {
-    let mut g = Graph::new();
-    let entry = compile_statement(&p.0, &mut g);
+    let mut code = Code {
+        entry: NodeIndex::new(0),
+        ir: Graph::new(),
+        fns: HashMap::new(),
+        label_counter: 0,
+    };
 
-    Code { entry, ir: g }
+    code.make_fn_available("exit", compile_exit);
+
+    let entry = compile_statement(&p.0, &mut code);
+    code.entry = entry;
+
+    match code.ir[entry] {
+        Ir::BB(BB {
+                   ref mut label,
+                   ref mut ins,
+               }) => {
+            *label = "_start:".into();
+            ins.push(Ins::Jmp("exit"));
+        }
+    }
+
+    code.ir.add_edge(entry, code.fns["exit"], Edge::DependsOn);
+    code
 }
 
-fn compile_statement(s: &Statement, g: &mut Graph<Ir, Edge>) -> NodeIndex {
+fn compile_statement(s: &Statement, code: &mut Code) -> NodeIndex {
     match *s {
         Statement::Switch(Switch { ref arg, ref cases }) => unimplemented!(),
         Statement::Break => unimplemented!(),
         Statement::Print(ref e) => {
+            code.make_fn_available("print", compile_print);
             let mut ins = vec![];
 
             match *e {
@@ -140,27 +224,112 @@ fn compile_statement(s: &Statement, g: &mut Graph<Ir, Edge>) -> NodeIndex {
                     let s = format!("{}\n", v);
                     let stack_space = max(1, s.len() as i64 / 8) * 8;
                     ins.push(Ins::SubImmI64(Reg::Rsp, stack_space));
-                    
+
                     for (i, b) in s.bytes().enumerate() {
                         ins.push(Ins::LoadImmI64(Reg::Rax, b as i64));
-                        ins.push(Ins::Store{ base: Reg::Rsp, offset: i as i64, src: Reg::Al });
+                        ins.push(Ins::Store {
+                            base: Reg::Rsp,
+                            offset: i as i64,
+                            src: Reg::Al,
+                        });
                     }
-                    
-                    ins.push(Ins::LoadImmI64(Reg::Rax, 1));
-                    ins.push(Ins::LoadImmI64(Reg::Rdi, 1));
-                    ins.push(Ins::MovRegReg(Reg::Rsi, Reg::Rsp));
-                    ins.push(Ins::LoadImmI64(Reg::Rdx, s.len() as i64));
-                    ins.push(Ins::Syscall);
+
+                    ins.push(Ins::MovRegReg(Reg::Rdi, Reg::Rsp));
+                    ins.push(Ins::LoadImmI64(Reg::Rsi, s.len() as i64));
+                    ins.push(Ins::Call("print"));
                     ins.push(Ins::AddImmI64(Reg::Rsp, stack_space));
                 }
                 Expr::Read => unimplemented!(),
             }
 
-            let node = Ir::BB(ins);
-            g.add_node(node)
+            let label = format!("L{}:", code.label_counter);
+            code.label_counter += 1;
+            let this = code.ir.add_node(Ir::BB(BB { label, ins }));
+            code.ir.add_edge(this, code.fns["print"], Edge::DependsOn);
+            this
         }
         Statement::Block(ref stmts) => unimplemented!(),
     }
 }
 
 fn compile_expr(e: &Expr, ins: &mut Vec<Ins>) {}
+
+fn compile_print() -> Ir {
+    let mut ins = vec![];
+
+    ins.push(Ins::MovRegReg(Reg::Rdx, Reg::Rsi));
+    ins.push(Ins::MovRegReg(Reg::Rsi, Reg::Rdi));
+    ins.push(Ins::LoadImmI64(Reg::Rax, 1));
+    ins.push(Ins::LoadImmI64(Reg::Rdi, 1));
+    ins.push(Ins::Syscall);
+    ins.push(Ins::Ret);
+
+    Ir::BB(BB {
+        label: "print:".into(),
+        ins,
+    })
+}
+
+fn compile_exit() -> Ir {
+    let mut ins = vec![];
+
+    ins.push(Ins::LoadImmI64(Reg::Rax, 60));
+    ins.push(Ins::Xor(Reg::Rdi, Reg::Rdi));
+    ins.push(Ins::Syscall);
+
+    Ir::BB(BB {
+        label: "exit:".into(),
+        ins,
+    })
+}
+
+struct StringBuilder {
+    string: String,
+    indent_level: u32,
+}
+
+impl StringBuilder {
+    fn into(self) -> String {
+        self.string
+    }
+    fn new() -> Self {
+        StringBuilder {
+            string: String::new(),
+            indent_level: 0,
+        }
+    }
+
+    fn line<S>(&mut self, s: S)
+    where
+        S: AsRef<str>,
+    {
+        for _ in 0..self.indent_level * 4 {
+            self.string.push(' ');
+        }
+        self.string.push_str(s.as_ref());
+        self.string.push('\n');
+    }
+
+    fn label<S>(&mut self, s: S)
+    where
+        S: AsRef<str>,
+    {
+        self.string.push_str(s.as_ref());
+        self.string.push('\n');
+    }
+
+    fn extend<S>(&mut self, s: S)
+    where
+        S: AsRef<str>,
+    {
+        self.string += s.as_ref();
+    }
+
+    fn indent(&mut self) {
+        self.indent_level += 1;
+    }
+
+    fn unindent(&mut self) {
+        self.indent_level = self.indent_level.checked_sub(1).unwrap();
+    }
+}
