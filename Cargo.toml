@@ -1,0 +1,15 @@
+[package]
+authors = ["BurntPizza <xburntpizza@gmail.com>"]
+build = "build.rs"
+name = "ftl"
+version = "0.1.0"
+
+[build-dependencies]
+lalrpop = "0.13.1"
+
+[dependencies]
+lalrpop-util = "0.13.1"
+petgraph = "0.4.5"
+regex = "0.2.2"
+structopt = "0.0.5"
+structopt-derive = "0.0.5"
