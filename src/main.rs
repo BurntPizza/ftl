@@ -28,13 +28,14 @@ fn main() {
     file.read_to_string(&mut contents).unwrap();
 
     let program = ftl_parser::parse_program(&*contents).unwrap();
+    // println!("Program: \n{:#?}", program);
     let code = program.compile();
     let asm = code.assemble();
     println!("{}", asm);
 }
 
 #[derive(Debug)]
-pub struct Program(Statement);
+pub struct Program(Vec<Statement>);
 
 impl Program {
     fn compile(&self) -> compiler::Code {
@@ -44,12 +45,14 @@ impl Program {
 
 #[derive(Debug)]
 pub enum Expr {
+    Var(String),
     I64(i64),
     Read,
 }
 
 #[derive(Debug)]
 pub enum Statement {
+    VarDecl(String, Expr),
     Print(Expr),
     Switch(Switch),
     Block(Vec<Statement>),

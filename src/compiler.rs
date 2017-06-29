@@ -192,62 +192,76 @@ pub fn compile(p: &Program) -> Code {
         label_counter: 0,
     };
 
+    let entry_node = Ir::BB(BB {
+        label: "_start:".into(),
+        ins: vec![],
+    });
+
+    code.entry = code.ir.add_node(entry_node);
     code.make_fn_available("exit", compile_exit);
 
-    let entry = compile_statement(&p.0, &mut code);
-    code.entry = entry;
+    for stmt in &p.0 {
+        compile_statement(stmt, code.entry, &mut code);
+    }
 
-    match code.ir[entry] {
-        Ir::BB(BB {
-                   ref mut label,
-                   ref mut ins,
-               }) => {
-            *label = "_start:".into();
+    match code.ir[code.entry] {
+        Ir::BB(BB { ref mut ins, .. }) => {
             ins.push(Ins::Jmp("exit"));
         }
     }
 
-    code.ir.add_edge(entry, code.fns["exit"], Edge::DependsOn);
+    code.ir.add_edge(
+        code.entry,
+        code.fns["exit"],
+        Edge::DependsOn,
+    );
+
     code
 }
 
-fn compile_statement(s: &Statement, code: &mut Code) -> NodeIndex {
+fn compile_statement(s: &Statement, current_node: NodeIndex, code: &mut Code) {
     match *s {
         Statement::Switch(Switch { ref arg, ref cases }) => unimplemented!(),
         Statement::Break => unimplemented!(),
         Statement::Print(ref e) => {
             code.make_fn_available("print", compile_print);
-            let mut ins = vec![];
+            {
+                let ins = match code.ir[current_node] {
+                    Ir::BB(BB { ref mut ins, .. }) => ins,
+                };
 
-            match *e {
-                Expr::I64(v) => {
-                    let s = format!("{}\n", v);
-                    let stack_space = max(1, s.len() as i64 / 8) * 8;
-                    ins.push(Ins::SubImmI64(Reg::Rsp, stack_space));
+                match *e {
+                    Expr::Var(ref s) => unimplemented!(),
+                    Expr::I64(v) => {
+                        let s = format!("{}\n", v);
+                        let stack_space = max(1, s.len() as i64 / 8) * 8;
+                        ins.push(Ins::SubImmI64(Reg::Rsp, stack_space));
 
-                    for (i, b) in s.bytes().enumerate() {
-                        ins.push(Ins::LoadImmI64(Reg::Rax, b as i64));
-                        ins.push(Ins::Store {
-                            base: Reg::Rsp,
-                            offset: i as i64,
-                            src: Reg::Al,
-                        });
+                        for (i, b) in s.bytes().enumerate() {
+                            ins.push(Ins::LoadImmI64(Reg::Rax, b as i64));
+                            ins.push(Ins::Store {
+                                base: Reg::Rsp,
+                                offset: i as i64,
+                                src: Reg::Al,
+                            });
+                        }
+
+                        ins.push(Ins::MovRegReg(Reg::Rdi, Reg::Rsp));
+                        ins.push(Ins::LoadImmI64(Reg::Rsi, s.len() as i64));
+                        ins.push(Ins::Call("print"));
+                        ins.push(Ins::AddImmI64(Reg::Rsp, stack_space));
                     }
-
-                    ins.push(Ins::MovRegReg(Reg::Rdi, Reg::Rsp));
-                    ins.push(Ins::LoadImmI64(Reg::Rsi, s.len() as i64));
-                    ins.push(Ins::Call("print"));
-                    ins.push(Ins::AddImmI64(Reg::Rsp, stack_space));
+                    Expr::Read => unimplemented!(),
                 }
-                Expr::Read => unimplemented!(),
             }
 
-            let label = format!("L{}:", code.label_counter);
-            code.label_counter += 1;
-            let this = code.ir.add_node(Ir::BB(BB { label, ins }));
-            code.ir.add_edge(this, code.fns["print"], Edge::DependsOn);
-            this
+            code.ir.add_edge(
+                current_node,
+                code.fns["print"],
+                Edge::DependsOn,
+            );
         }
+        Statement::VarDecl(ref s, ref e) => unimplemented!(),
         Statement::Block(ref stmts) => unimplemented!(),
     }
 }
@@ -260,7 +274,7 @@ fn compile_print() -> Ir {
     ins.push(Ins::MovRegReg(Reg::Rdx, Reg::Rsi));
     ins.push(Ins::MovRegReg(Reg::Rsi, Reg::Rdi));
     ins.push(Ins::LoadImmI64(Reg::Rax, 1));
-    ins.push(Ins::LoadImmI64(Reg::Rdi, 1));
+    ins.push(Ins::MovRegReg(Reg::Rdi, Reg::Rax));
     ins.push(Ins::Syscall);
     ins.push(Ins::Ret);
 
