@@ -20,6 +20,18 @@ switch: Switch = "switch " <arg: expr> "{" <cases: case*> "}"
 case: Case = "case " <n: num> ":" <s: statement> => Case(n, s);
 
 expr: Expr = {
+    <l:expr> "+" <r:factor> => Expr::Add(Box::new(l), Box::new(r)),
+    // <l:expr> "-" <r:factor> => Expr::Sub(Box::new(l), Box::new(r)),
+    factor,
+};
+
+factor: Expr = {
+    <l:factor> "*" <r:term> => Expr::Mult(Box::new(l), Box::new(r)),
+    // <l:factor> "/" <r:term> => Expr::Div(Box::new(l), Box::new(r)),
+    term,
+};
+
+term: Expr = {
     r"read\(\)" => Expr::Read,
     num => Expr::I64(<>),
     ident => Expr::Var(<>),

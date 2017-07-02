@@ -1,7 +1,6 @@
 
 use pg::prelude::*;
 
-use std::cmp::max;
 use std::fmt::{self, Display, Formatter};
 
 use std::collections::{HashMap, HashSet};
@@ -15,6 +14,7 @@ pub struct Code {
     fns: HashMap<String, NodeIndex>,
     label_counter: usize,
 }
+
 impl Code {
     fn make_fn_available<S>(&mut self, s: S, f: fn() -> Ir)
     where
@@ -43,92 +43,159 @@ impl Code {
         text.indent();
         text.line("section .text");
 
-        let mut stack = vec![self.entry];
-        let mut visited = HashSet::new();
-
-        while let Some(i) = stack.pop() {
-            if visited.contains(&i) {
-                continue;
-            }
-
-            visited.insert(i);
-
-            let node = &self.ir[i];
-
-            match *node {
-                Ir::BB(ref bb) => {
-                    self.compile_bb(bb, &mut text);
-                }
-            }
-
-            for i in self.ir.edges(i).filter(|e| *e.weight() == Edge::DependsOn) {
-                stack.push(i.target());
-            }
-        }
+        splice_graph(&self.ir, self.entry, &mut text);
 
         let mut p = p.into();
         p += &*data.into();
         p += &*text.into();
         p
     }
+}
 
-    fn compile_bb(&self, bb: &BB, block: &mut StringBuilder) {
-        let BB { ref label, ref ins } = *bb;
-        block.label(label);
-        for ins in ins {
-            self.compile_ins(*ins, block);
-        }
+fn splice_graph(g: &Graph<Ir, Edge>, entry: NodeIndex, block: &mut StringBuilder) {
+    if g.node_count() == 0 {
+        return;
     }
 
-    fn compile_ins(&self, ins: Ins, block: &mut StringBuilder) {
-        match ins {
-            Ins::AddImmI64(reg, val) => {
-                block.line(format!("add {}, {}", reg, val));
+    let mut visited = HashSet::new();
+    let mut stack = vec![entry];
+
+    while let Some(i) = stack.pop() {
+        if visited.contains(&i) {
+            continue;
+        }
+
+        visited.insert(i);
+
+        let node = &g[i];
+
+        match *node {
+            Ir::BB(ref bb) => {
+                compile_bb(bb, block);
             }
-            Ins::SubImmI64(reg, val) => {
-                block.line(format!("sub {}, {}", reg, val));
-            }
-            Ins::Push(reg) => {
-                block.line(format!("push {}", reg));
-            }
-            Ins::LoadImmI64(reg, val) => {
-                block.line(format!("mov {}, {}", reg, val));
-            }
-            Ins::MovRegReg(dest, src) => {
-                block.line(format!("mov {}, {}", dest, src));
-            }
-            Ins::Store { base, offset, src } => {
-                block.line(format!("mov [{} + {}], {}", base, offset, src));
-            }
-            Ins::Syscall => {
-                block.line("syscall");
-            }
-            Ins::Call(s) => {
-                block.line(format!("call {}", s));
-            }
-            Ins::Ret => {
-                block.line("ret");
-            }
-            Ins::Jmp(s) => {
-                block.line(format!("jmp {}", s));
-            }
-            Ins::Xor(dest, src) => {
-                block.line(format!("xor {}, {}", dest, src));
+            Ir::Graph(ref g) => {
+                splice_graph(g, NodeIndex::new(0), block);
             }
         }
+
+
+        for i in g.edges(i) {
+            stack.push(i.target());
+        }
+    }
+}
+
+fn compile_bb(bb: &BB, block: &mut StringBuilder) {
+    let BB { ref label, ref ins } = *bb;
+    block.label(label);
+    for ins in ins {
+        compile_ins(*ins, block);
+    }
+}
+
+fn compile_ins(ins: Ins, block: &mut StringBuilder) {
+    match ins {
+        Ins::AddImmI64(reg, val) => block.line(format!("add {}, {}", reg, val)),
+        Ins::SubImmI64(reg, val) => block.line(format!("sub {}, {}", reg, val)),
+        Ins::Push(reg) => block.line(format!("push {}", reg)),
+        Ins::Pop(reg) => block.line(format!("pop {}", reg)),
+        Ins::LoadImmI64(reg, val) => block.line(format!("mov {}, {}", reg, val)),
+        Ins::MovRegReg(dest, src) => block.line(format!("mov {}, {}", dest, src)),
+        Ins::Store(store) => {
+            match store {
+                Store::ImmReg { base, offset, src } => {
+                    block.line(format!("mov [{} + {}], {}", base, offset, src));
+                }
+                Store::RegReg { base, offset, src } => {
+                    block.line(format!("mov [{} + {}], {}", base, offset, src));
+                }
+                Store::RegImm {
+                    base,
+                    offset,
+                    val,
+                    size,
+                } => {
+                    block.line(format!("mov {} [{} + {}], {}", size, base, offset, val));
+                }
+                Store::ImmImm {
+                    base,
+                    offset,
+                    val,
+                    size,
+                } => {
+                    block.line(format!("mov {} [{} + {}], {}", size, base, offset, val));
+                }
+            }
+        }
+        Ins::Syscall => block.line("syscall"),
+        Ins::Call(s) => block.line(format!("call {}", s)),
+        Ins::Ret => block.line("ret"),
+        Ins::J(cc, label) => block.line(format!("j{} {}", cc, label)),
+        Ins::Xor(dest, src) => block.line(format!("xor {}, {}", dest, src)),
+        Ins::Cqo => block.line("cqo"),
+        Ins::Idiv(reg) => block.line(format!("idiv {}", reg)),
+        Ins::Inc(reg) => block.line(format!("inc {}", reg)),
+        Ins::Dec(reg) => block.line(format!("dec {}", reg)),
+        Ins::ShrImm(reg, v) => block.line(format!("shr {}, {}", reg, v)),
+        Ins::Test(a, b) => block.line(format!("test {}, {}", a, b)),
+        Ins::AndImm(a, b) => block.line(format!("and {}, {}", a, b)),
+        Ins::Cmov(cc, a, b) => block.line(format!("cmov{} {}, {}", cc, a, b)),
+        Ins::SarImm(a, b) => block.line(format!("sar {}, {}", a, b)),
+        Ins::Cmp(a, b) => block.line(format!("cmp {}, {}", a, b)),
+        Ins::Sub(a, b) => block.line(format!("sub {}, {}", a, b)),
+        Ins::Add(a, b) => block.line(format!("add {}, {}", a, b)),
+        Ins::Imul(a, b) => block.line(format!("imul {}, {}", a, b)),
     }
 }
 
 
 #[derive(Debug, PartialEq)]
-enum Edge {
+pub enum Edge {
     DependsOn,
+    Adj,
+}
+
+#[derive(Debug, Copy, Clone)]
+pub enum Size {
+    Byte,
+}
+
+impl Display for Size {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        let s = match *self {
+            Size::Byte => "byte",
+        };
+        write!(f, "{}", s)
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub enum Store {
+    ImmReg { base: Reg, offset: i64, src: Reg },
+    RegReg { base: Reg, offset: Reg, src: Reg },
+    RegImm {
+        base: Reg,
+        offset: Reg,
+        val: i64,
+        size: Size,
+    },
+    ImmImm {
+        base: Reg,
+        offset: i64,
+        val: i64,
+        size: Size,
+    },
 }
 
 #[derive(Debug, Copy, Clone)]
 pub enum Ins {
+
+    // TODO: remove most of this, make it abstract, this is the IR after all
+    
+
+
     LoadImmI64(Reg, i64),
-    Store { base: Reg, offset: i64, src: Reg },
+    Store(Store),
     Push(Reg),
     AddImmI64(Reg, i64),
     SubImmI64(Reg, i64),
@@ -136,37 +203,46 @@ pub enum Ins {
     Syscall,
     Call(&'static str),
     Ret,
-    Jmp(&'static str),
     Xor(Reg, Reg),
+    ShrImm(Reg, i64),
+    Inc(Reg),
+    Dec(Reg),
+    Cqo,
+    Idiv(Reg),
+    Test(Reg, Reg),
+    J(&'static str, &'static str),
+    AndImm(Reg, i64),
+    Cmp(Reg, Reg),
+    Cmov(&'static str, Reg, Reg),
+    Sub(Reg, Reg),
+    SarImm(Reg, i64),
+    Add(Reg, Reg),
+    Pop(Reg),
+    Imul(Reg, Reg),
 }
 
 #[derive(Debug, Copy, Clone)]
 pub enum Reg {
-    Rax,
-    Al,
-    Rbx,
-    Rcx,
-    Rdx,
+    Pinned(&'static str),
+    Sym(u32),
+}
 
-    Rsi,
-    Rdi,
-    Rsp,
+fn pinned(s: &'static str) -> Reg {
+    Reg::Pinned(s)
+}
 
-    R8,
+fn fresh() -> Reg {
+    use std::sync::atomic::*;
+    static COUNTER: AtomicUsize = ATOMIC_USIZE_INIT;
+    
+    Reg::Sym(COUNTER.fetch_add(1, Ordering::SeqCst) as u32)
 }
 
 impl Display for Reg {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         let s = match *self {
-            Reg::Al => "al",
-            Reg::Rax => "rax",
-            Reg::Rbx => "rbx",
-            Reg::Rcx => "rcx",
-            Reg::Rdx => "rdx",
-            Reg::Rsi => "rsi",
-            Reg::Rdi => "rdi",
-            Reg::Rsp => "rsp",
-            Reg::R8 => "r8",
+            Reg::Sym(n) => format!("${}", n),
+            Reg::Pinned(s) => s.into(),
         };
 
         write!(f, "{}", s)
@@ -176,6 +252,7 @@ impl Display for Reg {
 #[derive(Debug)]
 pub enum Ir {
     BB(BB),
+    Graph(Graph<Ir, Edge>),
 }
 
 #[derive(Debug)]
@@ -206,10 +283,14 @@ pub fn compile(p: &Program) -> Code {
 
     match code.ir[code.entry] {
         Ir::BB(BB { ref mut ins, .. }) => {
-            ins.push(Ins::Jmp("exit"));
+            ins.push(Ins::J("mp", "exit"));
         }
+        Ir::Graph(_) => unimplemented!(),
     }
 
+
+    // TODO: automate this as a separate pass?
+    // scan blocks starting at entry, adding deps as encountered in jmps and calls, etc.
     code.ir.add_edge(
         code.entry,
         code.fns["exit"],
@@ -228,31 +309,11 @@ fn compile_statement(s: &Statement, current_node: NodeIndex, code: &mut Code) {
             {
                 let ins = match code.ir[current_node] {
                     Ir::BB(BB { ref mut ins, .. }) => ins,
+                    Ir::Graph(_) => unimplemented!(),
                 };
 
-                match *e {
-                    Expr::Var(ref s) => unimplemented!(),
-                    Expr::I64(v) => {
-                        let s = format!("{}\n", v);
-                        let stack_space = max(1, s.len() as i64 / 8) * 8;
-                        ins.push(Ins::SubImmI64(Reg::Rsp, stack_space));
-
-                        for (i, b) in s.bytes().enumerate() {
-                            ins.push(Ins::LoadImmI64(Reg::Rax, b as i64));
-                            ins.push(Ins::Store {
-                                base: Reg::Rsp,
-                                offset: i as i64,
-                                src: Reg::Al,
-                            });
-                        }
-
-                        ins.push(Ins::MovRegReg(Reg::Rdi, Reg::Rsp));
-                        ins.push(Ins::LoadImmI64(Reg::Rsi, s.len() as i64));
-                        ins.push(Ins::Call("print"));
-                        ins.push(Ins::AddImmI64(Reg::Rsp, stack_space));
-                    }
-                    Expr::Read => unimplemented!(),
-                }
+                compile_expr(e, pinned("rdi"), ins);
+                ins.push(Ins::Call("print"));
             }
 
             code.ir.add_edge(
@@ -266,29 +327,126 @@ fn compile_statement(s: &Statement, current_node: NodeIndex, code: &mut Code) {
     }
 }
 
-fn compile_expr(e: &Expr, ins: &mut Vec<Ins>) {}
+fn compile_expr(e: &Expr, reg: Reg, ins: &mut Vec<Ins>) {
+    match *e {
+        Expr::I64(v) => ins.push(Ins::LoadImmI64(reg, v)),
+        Expr::Var(ref s) => unimplemented!(),
+        Expr::Read => unimplemented!(),
+        Expr::Add(ref a, ref b) => {
+            compile_expr(a, reg, ins);
+            let r = fresh();
+            compile_expr(b, r, ins);
+            ins.push(Ins::Add(reg, r));
+        }
+        Expr::Mult(ref a, ref b) => {
+            compile_expr(a, reg, ins);
+            let r = fresh();
+            compile_expr(b, r, ins);
+            ins.push(Ins::Imul(reg, r));
+        }
+    }
+}
 
 fn compile_print() -> Ir {
-    let mut ins = vec![];
-
-    ins.push(Ins::MovRegReg(Reg::Rdx, Reg::Rsi));
-    ins.push(Ins::MovRegReg(Reg::Rsi, Reg::Rdi));
-    ins.push(Ins::LoadImmI64(Reg::Rax, 1));
-    ins.push(Ins::MovRegReg(Reg::Rdi, Reg::Rax));
-    ins.push(Ins::Syscall);
-    ins.push(Ins::Ret);
-
-    Ir::BB(BB {
+    let bb1 = BB {
         label: "print:".into(),
-        ins,
-    })
+        ins: vec![
+            Ins::Push(pinned("r12")),
+            Ins::LoadImmI64(pinned("rcx"), 10),
+            Ins::MovRegReg(pinned("rax"), pinned("rdi")),
+            Ins::MovRegReg(pinned("rsi"), pinned("rdi")),
+            Ins::ShrImm(pinned("rdi"), 63),
+        ],
+    };
+
+    let bb2 = BB {
+        label: "__print_loop1:".into(),
+        ins: vec![
+            Ins::Inc(pinned("rdi")),
+            Ins::Cqo,
+            Ins::Idiv(pinned("rcx")),
+            Ins::Test(pinned("rax"), pinned("rax")),
+            Ins::J("nz", "__print_loop1"),
+
+            Ins::Inc(pinned("rdi")),
+            Ins::MovRegReg(pinned("rax"), pinned("rsi")),
+            Ins::LoadImmI64(pinned("r8"), 8),
+            Ins::MovRegReg(pinned("r12"), pinned("rdi")),
+            Ins::AndImm(pinned("r12"), 0xFFF0),
+            Ins::Cmp(pinned("r8"), pinned("r12")),
+            Ins::Cmov("a", pinned("r12"), pinned("r8")),
+            Ins::Sub(pinned("rsp"), pinned("r12")),
+            Ins::Dec(pinned("rdi")),
+            Ins::Test(pinned("rax"), pinned("rax")),
+            Ins::J("ns", "__print_skip_neg"),
+            Ins::Store(Store::ImmImm {
+                base: pinned("rsp"),
+                offset: 0,
+                val: 45,
+                size: Size::Byte,
+            }),
+        ],
+    };
+
+    let bb3 = BB {
+        label: "__print_skip_neg:".into(),
+        ins: vec![Ins::MovRegReg(pinned("r9"), pinned("rdi"))],
+    };
+
+    let bb4 = BB {
+        label: "__print_loop2:".into(),
+        ins: vec![
+            Ins::Dec(pinned("r9")),
+            Ins::Cqo,
+            Ins::Idiv(pinned("rcx")),
+            Ins::MovRegReg(pinned("r8"), pinned("rdx")),
+            Ins::SarImm(pinned("r8b"), 7),
+            Ins::Xor(pinned("dl"), pinned("r8b")),
+            Ins::Sub(pinned("dl"), pinned("r8b")),
+            Ins::AddImmI64(pinned("dl"), 48),
+            Ins::Store(Store::RegReg {
+                base: pinned("rsp"),
+                offset: pinned("r9"),
+                src: pinned("dl"),
+            }),
+            Ins::Test(pinned("rax"), pinned("rax")),
+            Ins::J("nz", "__print_loop2"),
+            Ins::Store(Store::RegImm {
+                base: pinned("rsp"),
+                offset: pinned("rdi"),
+                val: 10,
+                size: Size::Byte,
+            }),
+            Ins::Inc(pinned("rdi")),
+            Ins::MovRegReg(pinned("rdx"), pinned("rdi")),
+            Ins::LoadImmI64(pinned("rax"), 1),
+            Ins::LoadImmI64(pinned("rdi"), 1),
+            Ins::MovRegReg(pinned("rsi"), pinned("rsp")),
+            Ins::Syscall,
+            Ins::Add(pinned("rsp"), pinned("r12")),
+            Ins::Pop(pinned("r12")),
+            Ins::Ret,
+        ],
+    };
+
+    let mut g = Graph::new();
+    let bb1 = g.add_node(Ir::BB(bb1));
+    let bb2 = g.add_node(Ir::BB(bb2));
+    let bb3 = g.add_node(Ir::BB(bb3));
+    let bb4 = g.add_node(Ir::BB(bb4));
+
+    g.add_edge(bb1, bb2, Edge::Adj);
+    g.add_edge(bb2, bb3, Edge::Adj);
+    g.add_edge(bb2, bb4, Edge::Adj);
+
+    Ir::Graph(g)
 }
 
 fn compile_exit() -> Ir {
     let mut ins = vec![];
 
-    ins.push(Ins::LoadImmI64(Reg::Rax, 60));
-    ins.push(Ins::Xor(Reg::Rdi, Reg::Rdi));
+    ins.push(Ins::LoadImmI64(pinned("rax"), 60));
+    ins.push(Ins::Xor(pinned("rdi"), pinned("rdi")));
     ins.push(Ins::Syscall);
 
     Ir::BB(BB {

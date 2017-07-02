@@ -47,6 +47,8 @@ impl Program {
 pub enum Expr {
     Var(String),
     I64(i64),
+    Add(Box<Expr>, Box<Expr>),
+    Mult(Box<Expr>, Box<Expr>),
     Read,
 }
 
