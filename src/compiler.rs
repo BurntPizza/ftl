@@ -1,14 +1,14 @@
 
-use pg::prelude::*;
-
-use std::fmt::{self, Display, Formatter};
-
-use std::collections::{HashMap, HashSet};
+use pg::prelude::{NodeIndex, Graph, EdgeRef};
 
 use ::*;
 
+use std::fmt::{self, Display, Formatter};
+use std::collections::{HashMap, HashSet};
+
 #[derive(Debug, Clone)]
 pub struct Block {
+    idx: NodeIndex,
     label: String,
     ins: Vec<Inst>,
 }
@@ -16,17 +16,17 @@ pub struct Block {
 impl Display for Block {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         let mut s = String::new();
-        for i in &self.ins {
-            s += &format!("\n  {:?}", i);
+        for (i, ins) in self.ins.iter().enumerate() {
+            s += &format!("\n{}:  {:?}", i, ins);
         }
-        write!(f, "{}{}", self.label, s)
+        write!(f, "[{}] {}{}", self.idx.index(), self.label, s)
     }
 }
 
 
 pub type Cfg = pg::stable_graph::StableDiGraph<Block, Edge>;
 
-#[derive(PartialEq, Debug, Copy, Clone)]
+#[derive(Hash, Eq, PartialEq, Debug, Copy, Clone)]
 pub struct R(u32);
 
 #[derive(PartialEq, Debug, Clone)]
@@ -38,11 +38,12 @@ pub enum Inst {
     Assign(R, R),
     // pinned reg
     AssignFrom(R, &'static str),
+    AssignTo(&'static str, R),
     Load(R, i64),
     // a = b + c
     Add(R, R, R),
     Mult(R, R, R),
-    Call(&'static str, Vec<R>),
+    Call(&'static str),
     Jmp(&'static str),
 }
 
@@ -57,11 +58,12 @@ impl Prog {
     pub fn from(ast: &Program) -> Self {
         let mut g = Cfg::new();
         let mut names = HashMap::new();
+        let mut label_exits = HashMap::new();
 
         let mut prev = None;
 
         for stmt in &ast.0 {
-            let (begin, end) = c_statement(stmt, &mut names, &mut g);
+            let (begin, end) = c_statement(stmt, &mut names, &mut label_exits, &mut g);
             if let Some(p_end) = prev {
                 g.add_edge(p_end, begin, "next_top");
             }
@@ -74,35 +76,21 @@ impl Prog {
         }
 
         contract(&mut g);
-        // remove_nops(&mut g);
+        thread_jumps(&mut g);
+        label_blocks(&mut g);
 
-        {
-            let mut gg = Graph::new();
-            let mut map = HashMap::new();
-            
-            for i in g.node_indices() {
-                let new_node = gg.add_node(g[i].clone());
-                map.insert(i, new_node);
-            }
+        // print_graph(&g);
+        let rd = ReachingDefs::new(&g);
+        print_reaching(&rd);
 
-
-            for i in g.node_indices() {
-                for n in g.neighbors(i) {
-                    let e = g.find_edge(i, n).unwrap();
-                    gg.add_edge(map[&i], map[&n], g[e]);
-                }
-            }
-
-            let dot = pg::dot::Dot::new(&gg);
-            println!("{:#}", dot);
-        }
 
         Prog { cfg: g }
     }
 }
 
 fn contract(g: &mut Cfg) {
-    let mut stack = vec![NodeIndex::new(0)];
+    let start = g.node_indices().next().unwrap();
+    let mut stack = vec![start];
     let mut visited = HashSet::new();
 
     while let Some(i) = stack.pop() {
@@ -120,7 +108,7 @@ fn contract(g: &mut Cfg) {
                 let w = g[e];
                 g.add_edge(i, n, w);
             }
-            
+
             let mut ins = g.remove_node(child).unwrap().ins;
             g[i].ins.append(&mut ins);
         }
@@ -129,40 +117,200 @@ fn contract(g: &mut Cfg) {
             stack.push(n);
         }
     }
+}
 
-    let mut dfs = pg::visit::Dfs::new(&*g, NodeIndex::new(0));
+fn label_blocks(g: &mut Cfg) {
+    let start = g.node_indices().next().unwrap();
+    let mut dfs = pg::visit::Dfs::new(&*g, start);
     let mut counter = 0;
 
     while let Some(i) = dfs.next(&*g) {
+        g[i].idx = i;
         g[i].label = format!("L{}:", counter);
         counter += 1;
     }
 }
 
-// fn remove_nops(g: &mut Cfg) {
-//     let mut dfs = pg::visit::Dfs::new(&*g, NodeIndex::new(0));
-    
-//     while let Some(i) = dfs.next(&*g) {
-//         g[i].ins.retain(|i| *i != Inst::Nop);
-//     }
-// }
+fn thread_jumps(g: &mut Cfg) {
+    loop {
+        let mut to_add = vec![];
+        let mut changed = false;
+
+        g.retain_nodes(|g, i| {
+            if g[i].ins.is_empty() && g.neighbors(i).count() == 1 {
+                let target = g.neighbors(i).next().unwrap();
+
+                for n in g.neighbors_directed(i, pg::Incoming) {
+                    let w = g[g.find_edge(n, i).unwrap()];
+                    to_add.push((n, target, w));
+                    changed = true;
+                }
+
+                return false;
+            }
+
+            true
+        });
+
+        if !changed {
+            break;
+        }
+
+        for (s, t, w) in to_add {
+            g.add_edge(s, t, w);
+        }
+    }
+}
+
+type InsIdx = (NodeIndex, usize);
+
+struct ReachingDefs {
+    // defs: HashMap<R, Vec<InsIdx>>,
+    reach_in: HashMap<NodeIndex, HashSet<InsIdx>>,
+    reach_out: HashMap<NodeIndex, HashSet<InsIdx>>,
+}
+
+impl ReachingDefs {
+    fn new(g: &Cfg) -> Self {
+        let mut defs = HashMap::new();
+        let mut r_in = HashMap::new();
+        let mut r_out = HashMap::new();
+
+        for n in g.node_indices() {
+            r_in.insert(n, HashSet::new());
+            r_out.insert(n, HashSet::new());
+
+            for (i, ins) in g[n].ins.iter().enumerate() {
+                if let Some(r) = def_of(ins) {
+                    defs.entry(r).or_insert(HashSet::new()).insert((n, i));
+                }
+            }
+        }
+
+        let gen: HashMap<NodeIndex, HashSet<InsIdx>> = g.node_indices()
+            .map(|n| {
+                (
+                    n,
+                    g[n]
+                        .ins
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, ins)| def_of(ins).map(|_| (n, i)))
+                        .collect(),
+                )
+            })
+            .collect();
+
+
+        let kill = g.node_indices()
+            .map(|n| {
+                let gen = &gen[&n];
+                (
+                    n,
+                    g[n]
+                        .ins
+                        .iter()
+                        .filter_map(def_of)
+                        .flat_map(|r| {
+                            defs[&r].iter().cloned().filter(|def| !gen.contains(def))
+                        })
+                        .collect(),
+                )
+            })
+            .collect();
+
+        let init = Rdstate {
+            gen,
+            kill,
+            in_f: r_in,
+            out_f: r_out,
+        };
+
+        dataflow::analyze(g, init, Forward, May)
+    }
+
+    fn get(&self, ins: InsIdx) -> Vec<InsIdx> {
+        unimplemented!()
+    }
+}
+
+impl dataflow::Analysis for ReachingDefs {
+    type State = Rdstate;
+
+    fn from(state: Self::State) -> Self {
+        ReachingDefs {
+            reach_in: state.in_f,
+            reach_out: state.out_f,
+        }
+    }
+}
+
+struct Rdstate {
+    gen: HashMap<NodeIndex, HashSet<InsIdx>>,
+    kill: HashMap<NodeIndex, HashSet<InsIdx>>,
+    in_f: HashMap<NodeIndex, HashSet<InsIdx>>,
+    out_f: HashMap<NodeIndex, HashSet<InsIdx>>,
+}
+
+impl dataflow::State for Rdstate {
+    type NodeIdx = NodeIndex;
+    type Idx = InsIdx;
+    type Set = HashSet<Self::Idx>;
+
+    fn gen(&self, i: Self::NodeIdx) -> &Self::Set {
+        &self.gen[&i]
+    }
+
+    fn kill(&self, i: Self::NodeIdx) -> &Self::Set {
+        &self.kill[&i]
+    }
+
+    fn in_facts(&mut self, i: Self::NodeIdx) -> &mut Self::Set {
+        self.in_f.get_mut(&i).unwrap()
+    }
+
+    fn out_facts(&mut self, i: Self::NodeIdx) -> &mut Self::Set {
+        self.out_f.get_mut(&i).unwrap()
+    }
+}
+
+fn def_of(ins: &Inst) -> Option<R> {
+    match *ins {
+        Inst::Add(r, ..) |
+        Inst::Assign(r, _) |
+        Inst::AssignFrom(r, _) |
+        Inst::Load(r, _) |
+        Inst::Mult(r, ..) => Some(r),
+
+        Inst::AssignTo(..) |
+        Inst::Call(..) |
+        Inst::Jmp(..) |
+        Inst::Test(..) => None,
+    }
+}
 
 fn c_statement(
     stmt: &Statement,
     names: &mut HashMap<String, R>,
+    label_exits: &mut HashMap<String, NodeIndex>,
     g: &mut Cfg,
 ) -> (NodeIndex, NodeIndex) {
 
     fn c_stmt_inner(
         stmt: &Statement,
         names: &mut HashMap<String, R>,
+        label_exits: &mut HashMap<String, NodeIndex>,
         g: &mut Cfg,
         exit: Option<NodeIndex>,
     ) -> (NodeIndex, NodeIndex, bool) {
         match *stmt {
             Statement::VarDecl(ref sym, ref e) => {
                 let r = fresh();
-                names.insert(sym.to_owned(), r);
+                assert!(
+                    names.insert(sym.to_owned(), r).is_none(),
+                    "Cannot reuse variable name: {}",
+                    sym
+                );
                 let (node, b) = c_expr(e, g, names);
                 let this = g.add_node(block(Inst::Assign(r, b)));
                 g.add_edge(node, this, "assign");
@@ -170,7 +318,9 @@ fn c_statement(
             }
             Statement::Print(ref e) => {
                 let (node, r) = c_expr(e, g, names);
-                let this = g.add_node(block(Inst::Call("print", vec![r])));
+                let mut block = block(Inst::AssignTo("rdi", r));
+                block.ins.push(Inst::Call("print"));
+                let this = g.add_node(block);
                 g.add_edge(node, this, "print");
                 (node, this, false)
             }
@@ -178,7 +328,8 @@ fn c_statement(
                 let mut prev = None;
 
                 for stmt in stmts {
-                    let (n_begin, n_end, was_broke) = c_stmt_inner(stmt, names, g, exit);
+                    let (n_begin, n_end, was_broke) =
+                        c_stmt_inner(stmt, names, label_exits, g, exit);
 
                     if let Some((_, p_end)) = prev {
                         g.add_edge(p_end, n_begin, "block_next");
@@ -206,30 +357,54 @@ fn c_statement(
                 let mut prev = node;
                 let mut default = None;
 
+                let mut case_blocks = vec![];
+
                 for case in cases {
+                    match *case {
+                        Case::Case(..) => case_blocks.push(g.add_node(empty_block())),
+                        _ => {}
+                    }
+                }
+
+                for ((i, block), case) in case_blocks.iter().cloned().enumerate().zip(cases) {
                     match *case {
                         Case::Default(ref s) => {
                             default = Some(s);
                         }
                         Case::Case(v, ref s) => {
                             let (guard_node, guard_r) = c_expr(&Expr::I64(v), g, names);
-                            let test_node = g.add_node(block(Inst::Test(arg_r, guard_r)));
-                            let (begin, end, was_broke) = c_stmt_inner(s, names, g, Some(exit));
                             let c_end = g.add_node(empty_block());
-                            g.add_edge(prev, guard_node, "switch_next");
-                            g.add_edge(guard_node, test_node, "test");
-                            g.add_edge(test_node, begin, "true");
-                            g.add_edge(test_node, c_end, "false");
-                            if !was_broke {
-                                g.add_edge(end, c_end, "case_end");
+                            g[guard_node].ins.push(Inst::Test(arg_r, guard_r));
+
+
+                            if let Some(ref s) = *s {
+                                let (begin, end, was_broke) =
+                                    c_stmt_inner(s, names, label_exits, g, Some(exit));
+
+                                g.add_edge(block, begin, "");
+                                if !was_broke {
+                                    g.add_edge(end, c_end, "case_end");
+                                }
+                            } else {
+                                let n = if i + 1 < cases.len() {
+                                    case_blocks[i + 1]
+                                } else {
+                                    exit
+                                };
+                                g.add_edge(block, n, "");
                             }
+
+                            g.add_edge(guard_node, block, "true");
+                            g.add_edge(guard_node, c_end, "false");
+                            g.add_edge(prev, guard_node, "switch_next");
+
                             prev = c_end;
                         }
                     }
                 }
 
                 if let Some(s) = default {
-                    let (begin, end, _) = c_stmt_inner(s, names, g, Some(exit));
+                    let (begin, end, _) = c_stmt_inner(s, names, label_exits, g, Some(exit));
                     g.add_edge(prev, begin, "switch_next_default");
                     prev = end;
                 }
@@ -238,16 +413,52 @@ fn c_statement(
 
                 (node, exit, false)
             }
-            Statement::Break => {
-                let exit = exit.unwrap();
+            Statement::Break(ref s) => {
+                let exit = if let Some(ref label) = *s {
+                    label_exits[label]
+                } else {
+                    exit.unwrap()
+                };
+
                 let this = g.add_node(empty_block());
-                g.add_edge(this, exit, "break_exit");
+                g.add_edge(this, exit, "break");
                 (this, this, true)
+            }
+            Statement::While(ref cond, ref body, ref label) => {
+                let (node, arg_r) = c_expr(cond, g, names);
+                let (guard_expr, guard_r) = c_expr(&Expr::I64(0), g, names);
+                let guard = g.add_node(block(Inst::Test(arg_r, guard_r)));
+                let exit = g.add_node(empty_block());
+
+                g.add_edge(node, guard_expr, "");
+                g.add_edge(guard_expr, guard, "");
+
+                if let Some(ref label) = *label {
+                    assert!(label_exits.insert(label.clone(), exit).is_none());
+                }
+
+                let (begin, end, was_broke) = c_stmt_inner(body, names, label_exits, g, Some(exit));
+
+                g.add_edge(guard, begin, "false");
+                g.add_edge(guard, exit, "true");
+
+                if !was_broke {
+                    g.add_edge(end, guard, "loop");
+                }
+
+                (node, exit, false)
+            }
+            Statement::Assignment(ref s, ref e) => {
+                let (node, r) = c_expr(e, g, names);
+                let reg = names[s];
+
+                g[node].ins.push(Inst::Assign(reg, r));
+                (node, node, false)
             }
         }
     }
 
-    let (a, b, _) = c_stmt_inner(stmt, names, g, None);
+    let (a, b, _) = c_stmt_inner(stmt, names, label_exits, g, None);
     (a, b)
 }
 
@@ -261,11 +472,13 @@ fn c_expr(e: &Expr, g: &mut Cfg, names: &HashMap<String, R>) -> (NodeIndex, R) {
     ) -> (NodeIndex, R) {
         let (node_a, r_a) = c_expr(a, g, names);
         let (node_b, r_b) = c_expr(b, g, names);
-        g.add_edge(node_a, node_b, "binop1");
         let r = fresh();
-        let this = g.add_node(block(f(r, r_a, r_b)));
-        g.add_edge(node_b, this, "binop2");
-        (this, r)
+        let mut b_ins = g.remove_node(node_b).unwrap().ins;
+        let a = &mut g[node_a];
+        a.ins.append(&mut b_ins);
+        a.ins.push(f(r, r_a, r_b));
+
+        (node_a, r)
     };
 
     match *e {
@@ -284,9 +497,9 @@ fn c_expr(e: &Expr, g: &mut Cfg, names: &HashMap<String, R>) -> (NodeIndex, R) {
         }
         Expr::Read => {
             let r = fresh();
-            let call_node = g.add_node(block(Inst::Call("read", vec![])));
-            let node = g.add_node(block(Inst::AssignFrom(r, "rax")));
-            g.add_edge(call_node, node, "read");
+            let mut block = block(Inst::Call("read"));
+            block.ins.push(Inst::AssignFrom(r, "rax"));
+            let node = g.add_node(block);
             (node, r)
         }
     }
@@ -294,17 +507,70 @@ fn c_expr(e: &Expr, g: &mut Cfg, names: &HashMap<String, R>) -> (NodeIndex, R) {
 
 fn block(i: Inst) -> Block {
     Block {
-        label: "".into(),
         ins: vec![i],
+        ..empty_block()
     }
 }
 
 fn empty_block() -> Block {
     Block {
+        idx: NodeIndex::end(),
         label: "".into(),
         ins: vec![],
     }
 }
+
+fn print_graph(g: &Cfg) {
+    let mut gg = Graph::new();
+    let mut map = HashMap::new();
+
+    for i in g.node_indices() {
+        let new_node = gg.add_node(g[i].clone());
+        map.insert(i, new_node);
+    }
+
+
+    for i in g.node_indices() {
+        for n in g.neighbors(i) {
+            let e = g.find_edge(i, n).unwrap();
+            let s = map[&i];
+            let t = map[&n];
+            gg.add_edge(s, t, g[e]);
+        }
+    }
+
+    let dot = pg::dot::Dot::new(&gg);
+    println!("{:#}", dot);
+}
+
+
+fn print_reaching(rd: &ReachingDefs) {
+    let mut nodes: Vec<_> = rd.reach_in.keys().collect();
+    nodes.sort();
+
+    for n in nodes {
+        let mut i = rd.reach_in[&n]
+            .iter()
+            .map(|&(i, a)| (i.index(), a))
+            .collect::<Vec<_>>();
+        let mut o = rd.reach_out[&n]
+            .iter()
+            .map(|&(i, a)| (i.index(), a))
+            .collect::<Vec<_>>();
+
+        i.sort_by(|&(n1, i1), &(n2, i2)| n1.cmp(&n2).then(i1.cmp(&i2)));
+        o.sort_by(|&(n1, i1), &(n2, i2)| n1.cmp(&n2).then(i1.cmp(&i2)));
+
+        println!("{}: ", n.index());
+        println!("In: {:?}", i);
+        println!("Out: {:?}", o);
+        println!();
+    }
+}
+
+
+
+
 
 #[derive(Debug)]
 pub struct Code {

@@ -1,4 +1,8 @@
 
+extern crate dataflow;
+
+use dataflow::{Forward, May};
+
 extern crate petgraph as pg;
 extern crate structopt;
 #[macro_use]
@@ -9,7 +13,7 @@ use structopt::*;
 use std::fs::File;
 use std::io::prelude::*;
 
-pub mod ftl_parser;
+pub mod parser;
 pub mod compiler;
 
 #[derive(StructOpt)]
@@ -25,7 +29,7 @@ fn main() {
     let mut contents = String::new();
     file.read_to_string(&mut contents).unwrap();
 
-    let program = ftl_parser::parse_program(&*contents).unwrap();
+    let program = parser::parse_program(&*contents).unwrap();
     let p = compiler::Prog::from(&program);
     // println!("Program: \n{:#?}", program);
     // let code = program.compile();
@@ -58,12 +62,14 @@ pub enum Statement {
     Print(Expr),
     Switch(Switch),
     Block(Vec<Statement>),
-    Break,
+    Break(Option<String>),
+    While(Expr, Box<Statement>, Option<String>),
+    Assignment(String, Expr),
 }
 
 #[derive(Debug)]
 pub enum Case {
-    Case(i64, Statement),
+    Case(i64, Option<Statement>),
     Default(Statement),
 }
 

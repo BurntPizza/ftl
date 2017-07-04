@@ -7,18 +7,22 @@ grammar;
 pub program: Program = <statement*> => Program(<>);
 
 statement: Statement = {
-    "let " <i:ident> "=" <e:expr> ";" => Statement::VarDecl(i, e),
+    "let " <i: ident> "=" <e:expr> ";" => Statement::VarDecl(i, e),
     "print " <e: expr> ";" => Statement::Print(e),
-    "break;" => Statement::Break,
+    "break" <label: ident?> ";" => Statement::Break(label),
     switch => Statement::Switch(<>),
+    <l: label?> "while" "(" <e: expr> ")" <s: statement> => Statement::While(e, Box::new(s), l),
+    <i: ident> "=" <v: expr> ";" => Statement::Assignment(i, v),
     "{" <s: statement*> "}" => Statement::Block(s),
 };
 
-switch: Switch = "switch " <arg: expr> "{" <cases: case*> "}" 
+label: String = <i: ident> ":" => i;
+
+switch: Switch = "switch " <arg: expr> "{" <cases: case+> "}" 
     => Switch { arg: Box::new(arg), cases: cases };
 
 case: Case = { 
-    "case " <n: num> ":" <s: statement> => Case::Case(n, s),
+    "case " <n: num> ":" <s: statement?> => Case::Case(n, s),
     "default" ":" <s: statement> => Case::Default(s),
 };
 

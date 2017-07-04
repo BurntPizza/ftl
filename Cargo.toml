@@ -13,3 +13,4 @@ petgraph = "0.4.5"
 regex = "0.2.2"
 structopt = "0.0.5"
 structopt-derive = "0.0.5"
+dataflow = { git = "https://github.com/BurntPizza/dataflow.git" }
