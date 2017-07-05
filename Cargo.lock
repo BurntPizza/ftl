@@ -89,7 +89,7 @@ dependencies = [
 [[package]]
 name = "dataflow"
 version = "0.1.0"
-source = "git+https://github.com/BurntPizza/dataflow.git#e28b9b4bb99af56d6de7e78ae0ecdfcacb10b200"
+source = "git+https://github.com/BurntPizza/dataflow.git#5572091d3cc3c1319fe3a5074ffe655b88e00384"
 dependencies = [
  "petgraph 0.4.5 (registry+https://github.com/rust-lang/crates.io-index)",
 ]

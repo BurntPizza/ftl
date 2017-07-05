@@ -1,7 +1,7 @@
 
 extern crate dataflow;
 
-use dataflow::{Forward, May};
+use dataflow::{Forward, Backward, May};
 
 extern crate petgraph as pg;
 extern crate structopt;

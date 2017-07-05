@@ -26,7 +26,7 @@ impl Display for Block {
 
 pub type Cfg = pg::stable_graph::StableDiGraph<Block, Edge>;
 
-#[derive(Hash, Eq, PartialEq, Debug, Copy, Clone)]
+#[derive(Hash, Eq, PartialEq, Debug, Copy, Clone, PartialOrd, Ord)]
 pub struct R(u32);
 
 #[derive(PartialEq, Debug, Clone)]
@@ -79,9 +79,11 @@ impl Prog {
         thread_jumps(&mut g);
         label_blocks(&mut g);
 
-        // print_graph(&g);
+        print_graph(&g);
         let rd = ReachingDefs::new(&g);
-        print_reaching(&rd);
+        // print_reaching(&rd);
+        let lv = LiveVariables::new(&g);
+        // print_live(&lv);
 
 
         Prog { cfg: g }
@@ -163,6 +165,125 @@ fn thread_jumps(g: &mut Cfg) {
 }
 
 type InsIdx = (NodeIndex, usize);
+
+struct LiveVariables {
+    in_f: HashMap<NodeIndex, HashSet<R>>,
+    out_f: HashMap<NodeIndex, HashSet<R>>,
+}
+
+impl LiveVariables {
+    fn new(g: &Cfg) -> Self {
+        let in_f = g.node_indices().map(|n| (n, HashSet::new())).collect();
+        let out_f = g.node_indices().map(|n| (n, HashSet::new())).collect();
+
+        let mut gen = HashMap::new();
+        let mut kill = HashMap::new();
+
+        for n in g.node_indices() {
+            let mut lgen = HashSet::new();
+            let mut lkill = HashSet::new();
+
+            for ins in &g[n].ins {
+                match *ins {
+                    Inst::Add(a, b, c) => {
+                        if !lkill.contains(&b) {
+                            lgen.insert(b);
+                        }
+                        if !lkill.contains(&c) {
+                            lgen.insert(c);
+                        }
+                        lkill.insert(a);
+                    }
+                    Inst::Mult(a, b, c) => {
+                        if !lkill.contains(&b) {
+                            lgen.insert(b);
+                        }
+                        if !lkill.contains(&c) {
+                            lgen.insert(c);
+                        }
+                        lkill.insert(a);
+                    }
+                    Inst::Assign(a, b) => {
+                        if !lkill.contains(&b) {
+                            lgen.insert(b);
+                        }
+                        lkill.insert(a);
+                    }
+                    Inst::AssignFrom(a, b) => {
+                        // if !lkill.contains(&b) {lgen.insert(b);}
+                        lkill.insert(a);
+                    }
+                    Inst::AssignTo(a, b) => { /*lkill.insert(a);*/ }
+                    Inst::Call(_) => {}
+                    Inst::Jmp(_) => {}
+                    Inst::Load(a, _) => {
+                        lkill.insert(a);
+                    }
+                    Inst::Test(a, b) => {
+                        if !lkill.contains(&a) {
+                            lgen.insert(a);
+                        }
+                        if !lkill.contains(&b) {
+                            lgen.insert(b);
+                        }
+                    }
+                }
+            }
+
+            gen.insert(n, lgen);
+            kill.insert(n, lkill);
+        }
+
+        let init = Lvstate {
+            in_f,
+            out_f,
+            gen,
+            kill,
+        };
+
+        dataflow::analyze(g, init, Backward, May)
+    }
+}
+
+struct Lvstate {
+    in_f: HashMap<NodeIndex, HashSet<R>>,
+    out_f: HashMap<NodeIndex, HashSet<R>>,
+    gen: HashMap<NodeIndex, HashSet<R>>,
+    kill: HashMap<NodeIndex, HashSet<R>>,
+}
+
+impl dataflow::Analysis for LiveVariables {
+    type State = Lvstate;
+
+    fn from(state: Self::State) -> Self {
+        LiveVariables {
+            in_f: state.in_f,
+            out_f: state.out_f,
+        }
+    }
+}
+
+impl dataflow::State for Lvstate {
+    type NodeIdx = NodeIndex;
+    type Idx = R;
+    type Set = HashSet<Self::Idx>;
+
+    fn gen(&self, i: Self::NodeIdx) -> &Self::Set {
+        &self.gen[&i]
+    }
+
+    fn kill(&self, i: Self::NodeIdx) -> &Self::Set {
+        &self.kill[&i]
+    }
+
+    fn in_facts(&mut self, i: Self::NodeIdx) -> &mut Self::Set {
+        self.in_f.get_mut(&i).unwrap()
+    }
+
+    fn out_facts(&mut self, i: Self::NodeIdx) -> &mut Self::Set {
+        self.out_f.get_mut(&i).unwrap()
+    }
+}
 
 struct ReachingDefs {
     // defs: HashMap<R, Vec<InsIdx>>,
@@ -427,11 +548,11 @@ fn c_statement(
             Statement::While(ref cond, ref body, ref label) => {
                 let (node, arg_r) = c_expr(cond, g, names);
                 let (guard_expr, guard_r) = c_expr(&Expr::I64(0), g, names);
-                let guard = g.add_node(block(Inst::Test(arg_r, guard_r)));
-                let exit = g.add_node(empty_block());
+                let guard_ins = g.remove_node(guard_expr).unwrap().ins;
+                g[node].ins.extend(guard_ins);
+                g[node].ins.push(Inst::Test(arg_r, guard_r));
 
-                g.add_edge(node, guard_expr, "");
-                g.add_edge(guard_expr, guard, "");
+                let exit = g.add_node(empty_block());
 
                 if let Some(ref label) = *label {
                     assert!(label_exits.insert(label.clone(), exit).is_none());
@@ -439,11 +560,11 @@ fn c_statement(
 
                 let (begin, end, was_broke) = c_stmt_inner(body, names, label_exits, g, Some(exit));
 
-                g.add_edge(guard, begin, "false");
-                g.add_edge(guard, exit, "true");
+                g.add_edge(node, begin, "false");
+                g.add_edge(node, exit, "true");
 
                 if !was_broke {
-                    g.add_edge(end, guard, "loop");
+                    g.add_edge(end, node, "loop");
                 }
 
                 (node, exit, false)
@@ -490,10 +611,10 @@ fn c_expr(e: &Expr, g: &mut Cfg, names: &HashMap<String, R>) -> (NodeIndex, R) {
         Expr::Add(ref a, ref b) => bin_op(Inst::Add, a, b, g, names),
         Expr::Mult(ref a, ref b) => bin_op(Inst::Mult, a, b, g, names),
         Expr::Var(ref s) => {
-            let r = fresh();
+            // let r = fresh();
             let b = names[s];
-            let this = g.add_node(block(Inst::Assign(r, b)));
-            (this, r)
+            let this = g.add_node(/*block(Inst::Assign(r, b))*/empty_block());
+            (this, b)
         }
         Expr::Read => {
             let r = fresh();
@@ -568,7 +689,27 @@ fn print_reaching(rd: &ReachingDefs) {
     }
 }
 
+fn print_live(rd: &LiveVariables) {
+    let mut nodes: Vec<_> = rd.in_f.keys().collect();
+    nodes.sort();
 
+    for n in nodes {
+        let mut i = rd.in_f[&n]
+            .iter().cloned()
+            .collect::<Vec<_>>();
+        let mut o = rd.out_f[&n]
+            .iter().cloned()
+            .collect::<Vec<_>>();
+
+        i.sort_by(|r1, r2| r1.cmp(&r2));
+        o.sort_by(|r1, r2| r1.cmp(&r2));
+
+        println!("{}: ", n.index());
+        println!("In: {:?}", i);
+        println!("Out: {:?}", o);
+        println!();
+    }
+}
 
 
 
