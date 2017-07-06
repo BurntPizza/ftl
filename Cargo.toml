@@ -8,9 +8,14 @@ version = "0.1.0"
 lalrpop = "0.13.1"
 
 [dependencies]
+itertools = "0.6.0"
 lalrpop-util = "0.13.1"
 petgraph = "0.4.5"
 regex = "0.2.2"
 structopt = "0.0.5"
 structopt-derive = "0.0.5"
-dataflow = { git = "https://github.com/BurntPizza/dataflow.git" }
+strum = "0.6.0"
+strum_macros = "0.6.1"
+
+[dependencies.dataflow]
+git = "https://github.com/BurntPizza/dataflow.git"

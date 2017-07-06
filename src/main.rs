@@ -3,11 +3,17 @@ extern crate dataflow;
 
 use dataflow::{Forward, Backward, May};
 
+#[macro_use]
+extern crate strum_macros;
+extern crate strum;
+extern crate itertools;
 extern crate petgraph as pg;
 extern crate structopt;
 #[macro_use]
 extern crate structopt_derive;
 
+use strum::IntoEnumIterator;
+use itertools::*;
 use structopt::*;
 
 use std::fs::File;
@@ -30,7 +36,8 @@ fn main() {
     file.read_to_string(&mut contents).unwrap();
 
     let program = parser::parse_program(&*contents).unwrap();
-    let p = compiler::Prog::from(&program);
+    let p = compiler::compile(&program);
+    println!("{}", p);
     // println!("Program: \n{:#?}", program);
     // let code = program.compile();
     // let asm = code.assemble();
@@ -40,12 +47,12 @@ fn main() {
 #[derive(Debug)]
 pub struct Program(Vec<Statement>);
 
-impl Program {
-    fn compile(&self) -> compiler::Code {
-        unimplemented!()
-        // compiler::compile(self)
-    }
-}
+// impl Program {
+//     fn compile(&self) -> compiler::Code {
+//         unimplemented!()
+//         // compiler::compile(self)
+//     }
+// }
 
 #[derive(Debug)]
 pub enum Expr {

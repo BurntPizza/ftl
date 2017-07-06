@@ -1,9 +1,9 @@
 
-use pg::prelude::{NodeIndex, Graph, EdgeRef};
+use pg::prelude::{NodeIndex, Graph};
 
 use ::*;
 
-use std::fmt::{self, Display, Formatter};
+use std::fmt::{self, Display, Debug, Formatter};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone)]
@@ -23,70 +23,434 @@ impl Display for Block {
     }
 }
 
-
 pub type Cfg = pg::stable_graph::StableDiGraph<Block, Edge>;
 
-#[derive(Hash, Eq, PartialEq, Debug, Copy, Clone, PartialOrd, Ord)]
-pub struct R(u32);
+#[derive(Hash, Eq, PartialEq, Copy, PartialOrd, Ord, Clone)]
+pub enum R {
+    R(u32),
+    Pin(Pinned),
+    Const(i64),
+}
+
+impl R {
+    pub fn is_const(&self) -> bool {
+        match *self {
+            R::Const(_) => true,
+            _ => false,
+        }
+    }
+    pub fn is_pinned(&self) -> bool {
+        match *self {
+            R::Pin(_) => true,
+            _ => false,
+        }
+    }
+}
+
+#[derive(EnumIter, Hash, Eq, PartialEq, Copy, PartialOrd, Ord, Clone)]
+pub enum Pinned {
+    Rax,
+    Rbx,
+    Rcx,
+    Rdx,
+    Rdi,
+    Rsi,
+    R8,
+    R9,
+    R10,
+    R11,
+    R12,
+    R13,
+    R14,
+    R15,
+    Rbp,
+}
+
+impl Display for R {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        match *self {
+            R::Pin(p) => write!(f, "{}", p),
+            R::R(n) => write!(f, "R{}", n),
+            R::Const(val) => write!(f, "{}", val),
+        }
+    }
+}
+
+impl Debug for R {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        Display::fmt(self, f)
+    }
+}
+
+impl Display for Pinned {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        use self::Pinned::*;
+        let s = match *self {
+            Rax => "rax",
+            Rbx => "rbx",
+            Rcx => "rcx",
+            Rdx => "rdx",
+            Rdi => "rdi",
+            Rsi => "rsi",
+            R8 => "r8",
+            R9 => "r9",
+            R10 => "r10",
+            R11 => "r11",
+            R12 => "r12",
+            R13 => "r13",
+            R14 => "r14",
+            R15 => "r15",
+            Rbp => "rbp",
+        };
+        write!(f, "{}", s)
+    }
+}
+
+impl Debug for Pinned {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        Display::fmt(self, f)
+    }
+}
 
 #[derive(PartialEq, Debug, Clone)]
 pub enum Inst {
-    // Nop,
     // a == b?
     Test(R, R),
     // a = b
     Assign(R, R),
-    // pinned reg
-    AssignFrom(R, &'static str),
-    AssignTo(&'static str, R),
+    AssignFrom(R, Pinned),
+    AssignTo(Pinned, R),
     Load(R, i64),
     // a = b + c
     Add(R, R, R),
     Mult(R, R, R),
-    Call(&'static str),
+    Call(&'static str, usize),
     Jmp(&'static str),
 }
 
+pub enum Instruction {}
+
 type Edge = &'static str;
 
-#[derive(Debug)]
-pub struct Prog {
-    cfg: Cfg,
+pub fn compile(ast: &Program) -> String {
+    let mut g = Cfg::new();
+    let mut names = HashMap::new();
+    let mut label_exits = HashMap::new();
+
+    let mut prev = None;
+
+    for stmt in &ast.0 {
+        let (begin, end) = c_statement(stmt, &mut names, &mut label_exits, &mut g);
+        if let Some(p_end) = prev {
+            g.add_edge(p_end, begin, "next_top");
+        }
+        prev = Some(end);
+    }
+
+    let exit = g.add_node(block(Inst::Jmp("exit")));
+    if let Some(prev) = prev {
+        g.add_edge(prev, exit, "top_exit");
+    }
+
+    contract(&mut g);
+    thread_jumps(&mut g);
+    label_blocks(&mut g);
+
+    let (defs, uses) = defs_uses(&g);
+
+    const_prop(&mut g, defs, uses);
+
+    // print_graph(&g);
+    // return "".into();
+
+    let lv = LiveVariables::new(&g);
+    let ra = allocate_registers(&g, &lv);
+
+    // apply register allocation
+    let start = g.node_indices().next().unwrap();
+    let mut dfs = pg::visit::Dfs::new(&g, start);
+    while let Some(n) = dfs.next(&g) {
+        for ins in g[n].ins.iter_mut() {
+            match ins {
+                &mut Inst::Add(ref mut a, ref mut b, ref mut c) => {
+                    assert!(!a.is_const());
+                    *a = R::Pin(ra[a]);
+                    if !b.is_const() {
+                        *b = R::Pin(ra[b]);
+                    }
+                    if !c.is_const() {
+                        *c = R::Pin(ra[c]);
+                    }
+                }
+                &mut Inst::Test(ref mut a, ref mut b) => {
+                    if !a.is_const() {
+                        *a = R::Pin(ra[a]);
+                    }
+                    if !b.is_const() {
+                        *b = R::Pin(ra[b]);
+                    }
+                }
+                &mut Inst::Assign(ref mut a, ref mut b) => {
+                    assert!(!a.is_const());
+                    *a = R::Pin(ra[a]);
+                    if !b.is_const() {
+                        *b = R::Pin(ra[b]);
+                    }
+                }
+                &mut Inst::AssignFrom(ref mut a, ref mut b) => {
+                    assert!(!a.is_const());
+                    *a = R::Pin(ra[a]);
+                    debug_assert_eq!(*b, ra[&R::Pin(*b)]);
+                }
+                &mut Inst::AssignTo(ref mut a, ref mut b) => {
+                    debug_assert_eq!(*a, ra[&R::Pin(*a)]);
+                    if !b.is_const() {
+                        *b = R::Pin(ra[b]);
+                    }
+                }
+                &mut Inst::Mult(ref mut a, ref mut b, ref mut c) => {
+                    assert!(!a.is_const());
+                    *a = R::Pin(ra[a]);
+                    if !b.is_const() {
+                        *b = R::Pin(ra[b]);
+                    }
+                    if !c.is_const() {
+                        *c = R::Pin(ra[c]);
+                    }
+                }
+                &mut Inst::Load(ref mut a, _) => {
+                    assert!(!a.is_const());
+                    *a = R::Pin(ra[a]);
+                }
+                &mut Inst::Call(..) |
+                &mut Inst::Jmp(..) => {}
+            }
+        }
+    }
+
+    let mut p = StringBuilder::new();
+
+    p.indent();
+    p.line("bits 64");
+    p.line("global _start");
+
+    let mut data = StringBuilder::new();
+    data.indent();
+    data.line("section .data");
+
+    let mut text = StringBuilder::new();
+    text.indent();
+    text.line("section .text");
+    text.label("_start");
+
+    let start = g.node_indices().next().unwrap();
+    let mut stack = vec![start];
+    let mut visited = HashSet::new();
+
+    while let Some(n) = stack.pop() {
+        if visited.contains(&n) {
+            continue;
+        }
+
+        visited.insert(n);
+
+        compile_bb(&g, n, &mut text);
+
+        if let Some(&Inst::Test(a, b)) = g[n].ins.last() {
+            assert_eq!(g.neighbors(n).count(), 2);
+            let mut neighbors = g.neighbors(n);
+            let mut small_path = neighbors.next().unwrap();
+            let mut large_path = neighbors.next().unwrap();
+            if g[small_path].ins.len() > g[large_path].ins.len() {
+                std::mem::swap(&mut large_path, &mut small_path);
+            }
+            let cc = g[g.find_edge(n, large_path).unwrap()] == "true";
+
+            if a.is_const() && b.is_const() {
+                match (a, b) {
+                    (R::Const(a), R::Const(b)) => {
+                        let true_path = if cc { large_path } else { small_path };
+                        let false_path = if cc { small_path } else { large_path };
+                        stack.push(if a == b { true_path } else { false_path });
+                    }
+                    _ => unreachable!(),
+                }
+            } else {
+                let jmp = if cc { "je" } else { "jne" };
+                let target = &g[large_path].label;
+                text.line(format!("{} {}", jmp, target));
+
+                stack.push(large_path);
+                stack.push(small_path); // small path will be written next
+            }
+        } else {
+            assert!(g.neighbors(n).count() <= 1);
+            if let Some(n) = g.neighbors(n).next() {
+                stack.push(n);
+                if visited.contains(&n) {
+                    // back edge, must jump
+                    text.line(format!("jmp {}", g[n].label));
+                }
+            }
+        }
+    }
+
+    link_builtins(&mut text);
+
+    let mut p = p.into();
+    p += &*data.into();
+    p += &*text.into();
+    p
 }
 
-impl Prog {
-    pub fn from(ast: &Program) -> Self {
-        let mut g = Cfg::new();
-        let mut names = HashMap::new();
-        let mut label_exits = HashMap::new();
+fn const_prop(
+    g: &mut Cfg,
+    defs: HashMap<R, HashSet<InsIdx>>,
+    uses: HashMap<R, HashSet<InsIdx>>,
+) -> HashMap<R, i64> {
+    let mut consts = HashMap::new();
+    let mut to_remove = HashSet::new();
 
-        let mut prev = None;
+    // TODO: transitive propagation
 
-        for stmt in &ast.0 {
-            let (begin, end) = c_statement(stmt, &mut names, &mut label_exits, &mut g);
-            if let Some(p_end) = prev {
-                g.add_edge(p_end, begin, "next_top");
+    for n in g.node_indices() {
+        for i in (0..g[n].ins.len()).rev() {
+            if let Inst::Load(r, val) = g[n].ins[i] {
+                assert!(defs[&r].contains(&(n, i)));
+                if defs[&r].len() == 1 {
+                    consts.insert(r, val);
+                    to_remove.insert((n, i));
+                }
             }
-            prev = Some(end);
         }
+    }
 
-        let exit = g.add_node(block(Inst::Jmp("exit")));
-        if let Some(prev) = prev {
-            g.add_edge(prev, exit, "top_exit");
+    for (r, uses, &val) in uses.into_iter().filter_map(|(r, uses)| {
+        consts.get(&r).map(|val| (r, uses, val))
+    })
+    {
+        for (n, i) in uses {
+            match g[n].ins.get_mut(i).unwrap() {
+                &mut Inst::Add(ref mut a, ref mut b, ref mut c) => {
+                    if *b == r {
+                        *b = R::Const(val);
+                    }
+                    if *c == r {
+                        *c = R::Const(val);
+                    }
+                }
+                &mut Inst::Test(ref mut a, ref mut b) => {
+                    if *a == r {
+                        *a = R::Const(val);
+                    }
+                    if *b == r {
+                        *b = R::Const(val);
+                    }
+                }
+                &mut Inst::Assign(ref mut a, ref mut b) => {
+                    if *b == r {
+                        *b = R::Const(val);
+                    }
+                }
+                &mut Inst::AssignTo(ref mut a, ref mut b) => {
+                    if *b == r {
+                        *b = R::Const(val);
+                    }
+                }
+                &mut Inst::Mult(ref mut a, ref mut b, ref mut c) => {
+                    if *b == r {
+                        *b = R::Const(val);
+                    }
+                    if *c == r {
+                        *c = R::Const(val);
+                    }
+                }
+                &mut Inst::AssignFrom(ref mut a, ref mut b) => {}
+                &mut Inst::Load(ref mut a, _) => {}
+                &mut Inst::Call(..) |
+                &mut Inst::Jmp(..) => {}
+            }
         }
+    }
 
-        contract(&mut g);
-        thread_jumps(&mut g);
-        label_blocks(&mut g);
+    let start = g.node_indices().next().unwrap();
+    let mut dfs = pg::visit::Dfs::new(&*g, start);
 
-        print_graph(&g);
-        let rd = ReachingDefs::new(&g);
-        // print_reaching(&rd);
-        let lv = LiveVariables::new(&g);
-        // print_live(&lv);
+    while let Some(n) = dfs.next(&*g) {
+        let block = &mut g[n].ins;
+        for i in (0..block.len()).rev() {
+            if to_remove.contains(&(n, i)) {
+                block.remove(i);
+            }
+        }
+    }
 
+    consts
+}
 
-        Prog { cfg: g }
+fn defs_uses(g: &Cfg) -> (HashMap<R, HashSet<InsIdx>>, HashMap<R, HashSet<InsIdx>>) {
+    let rd = ReachingDefs::new(&g);
+    let mut ins_idx_to_r = HashMap::new();
+    let mut uses = HashMap::new();
+    let mut defs = HashMap::new();
+
+    for n in g.node_indices() {
+        for (i, ins) in g[n].ins.iter().enumerate() {
+            let written: Vec<_> = vars_written(ins)
+                .into_iter()
+                .filter(|r| !r.is_pinned())
+                .collect();
+            assert!(written.len() <= 1);
+            if let Some(r) = written.into_iter().next() {
+                uses.entry(r).or_insert(HashSet::new());
+                defs.entry(r).or_insert(HashSet::new()).insert((n, i));
+                ins_idx_to_r.insert((n, i), r);
+            }
+        }
+    }
+
+    for n in g.node_indices() {
+        let ia = rd.internal_analysis(g, n);
+        for (i, ins) in g[n].ins.iter().enumerate() {
+            for r in vars_read(ins).into_iter().filter(|r| !r.is_pinned()) {
+                for def in &ia[&i] {
+                    if r == ins_idx_to_r[def] {
+                        uses.get_mut(&r).unwrap().insert((n, i));
+                    }
+                }
+            }
+        }
+    }
+
+    // print_graph(&graph.map(|_, n| format!("{}: {}", n.0.index(), n.1), |_, _| ""));
+
+    (defs, uses)
+}
+
+fn compile_bb(g: &Cfg, n: NodeIndex, asm: &mut StringBuilder) {
+    let bb = &g[n];
+    asm.label(&bb.label);
+
+    for ins in &bb.ins {
+        match *ins {
+            Inst::Add(a, b, c) => asm.line(format!("lea {}, [{} + {}]", a, b, c)),
+            Inst::Assign(a, b) => asm.line(format!("mov {}, {}", a, b)),
+            Inst::AssignFrom(a, b) => asm.line(format!("mov {}, {}", a, b)),
+            Inst::AssignTo(a, b) => asm.line(format!("mov {}, {}", a, b)),
+            Inst::Call(s, _) => asm.line(format!("call {}", s)),
+            Inst::Jmp(s) => asm.line(format!("jmp {}", s)),
+            Inst::Load(a, b) => asm.line(format!("mov {}, {}", a, b)),
+            Inst::Mult(a, b, c) => asm.line(format!("lea {}, [{} * {}]", a, b, c)),
+            Inst::Test(mut a, mut b) => {
+                if a.is_const() {
+                    if b.is_const() {
+                        continue;
+                    }
+                    std::mem::swap(&mut a, &mut b);
+                }
+                asm.line(format!("cmp {}, {}", a, b));
+            }
+        }
     }
 }
 
@@ -98,8 +462,11 @@ fn contract(g: &mut Cfg) {
     while let Some(i) = stack.pop() {
         visited.insert(i);
 
-        while g.neighbors(i).count() == 1 {
-            let child = g.neighbors(i).next().unwrap();
+        while g.neighbors(i).filter(|n| !visited.contains(n)).count() == 1 {
+            let child = g.neighbors(i)
+                .filter(|n| !visited.contains(n))
+                .next()
+                .unwrap();
             if g.neighbors_directed(child, pg::Direction::Incoming).count() > 1 {
                 break;
             }
@@ -128,7 +495,7 @@ fn label_blocks(g: &mut Cfg) {
 
     while let Some(i) = dfs.next(&*g) {
         g[i].idx = i;
-        g[i].label = format!("L{}:", counter);
+        g[i].label = format!("L{}", counter);
         counter += 1;
     }
 }
@@ -164,14 +531,176 @@ fn thread_jumps(g: &mut Cfg) {
     }
 }
 
+fn allocate_registers(g: &Cfg, lv: &LiveVariables) -> HashMap<R, Pinned> {
+    let colors: HashSet<Pinned> = Pinned::iter().collect();
+    let mut mapping = HashMap::new();
+    let mut idx_mapping = HashMap::new();
+    let mut ig = Graph::new_undirected();
+
+    // build ig
+    for node in g.node_indices() {
+        for live_set in lv.internal_liveness(g, node).values() {
+            for &r in live_set {
+                idx_mapping.entry(r).or_insert_with(|| ig.add_node(r));
+            }
+            for (a, b) in live_set.iter().tuple_combinations() {
+                ig.update_edge(idx_mapping[a], idx_mapping[b], ());
+            }
+        }
+    }
+
+    let k = colors.len();
+    let mut stack = vec![];
+
+    while ig.node_count() > 0 {
+        let node = ig.node_indices()
+            .filter(|n| ig.neighbors(*n).count() < k)
+            .next()
+            .unwrap_or_else(|| ig.node_indices().next().unwrap());
+        let neighbors: Vec<R> = ig.neighbors(node).map(|n| ig[n]).collect();
+        let r = ig.remove_node(node).unwrap();
+        stack.push((r, neighbors));
+    }
+
+    while let Some((node, neighbors)) = stack.pop() {
+        let neighbor_colors = neighbors
+            .into_iter()
+            .filter_map(|r| mapping.get(&r))
+            .cloned()
+            .collect();
+        let color = match node {
+            R::Pin(p) => p,
+            _ => {
+                *colors.difference(&neighbor_colors).next().expect(
+                    "failed to K-color",
+                )
+            }
+        };
+        mapping.insert(node, color);
+    }
+
+    if cfg!(debug_assertions) {
+        for (&r, &m) in &mapping {
+            if let R::Pin(p) = r {
+                debug_assert_eq!(p, m);
+            }
+        }
+    }
+
+    mapping
+}
+
 type InsIdx = (NodeIndex, usize);
 
 struct LiveVariables {
-    in_f: HashMap<NodeIndex, HashSet<R>>,
     out_f: HashMap<NodeIndex, HashSet<R>>,
 }
 
+fn vars_read(ins: &Inst) -> HashSet<R> {
+    let mut set = HashSet::new();
+    match *ins {
+        Inst::Add(_, b, c) => {
+            if !b.is_const() {
+                set.insert(b);
+            }
+            if !c.is_const() {
+                set.insert(c);
+            }
+        }
+        Inst::Mult(_, b, c) => {
+            if !b.is_const() {
+                set.insert(b);
+            }
+            if !c.is_const() {
+                set.insert(c);
+            }
+        }
+        Inst::Assign(_, b) => {
+            if !b.is_const() {
+                set.insert(b);
+            }
+        }
+        Inst::AssignTo(_, b) => {
+            if !b.is_const() {
+                set.insert(b);
+            }
+        }
+        Inst::AssignFrom(_, b) => {
+            set.insert(R::Pin(b));
+        }
+        Inst::Call(_, num_args) => {
+            use self::Pinned::*;
+            set.extend(vars_written(ins)); // hack?
+            // SysV: RDI, RSI, RDX, RCX
+            assert!(num_args <= 4); // only supporting up to 4 args for now
+            set.extend([Rdi, Rsi, Rdx, Rcx].iter().cloned().take(num_args).map(
+                R::Pin,
+            ));
+        }
+        Inst::Jmp(_) => {}
+        Inst::Load(..) => {}
+        Inst::Test(a, b) => {
+            if !a.is_const() {
+                set.insert(a);
+            }
+            if !b.is_const() {
+                set.insert(b);
+            }
+        }
+    }
+    set
+}
+
+fn vars_written(ins: &Inst) -> HashSet<R> {
+    let mut set = HashSet::new();
+
+    match *ins {
+        Inst::Add(r, ..) |
+        Inst::Assign(r, _) |
+        Inst::AssignFrom(r, _) |
+        Inst::Load(r, _) |
+        Inst::Mult(r, ..) => {
+            set.insert(r);
+        }
+        Inst::AssignTo(r, _) => {
+            set.insert(R::Pin(r));
+        }
+        Inst::Call(..) => {
+            use self::Pinned::*;
+            set.extend(
+                [Rax, Rcx, Rdx, Rsi, Rdi, R8, R9, R10, R11]
+                    .iter()
+                    .cloned()
+                    .map(R::Pin),
+            );
+        }
+        Inst::Jmp(..) | Inst::Test(..) => {}
+    }
+    set
+}
+
 impl LiveVariables {
+    fn internal_liveness(&self, g: &Cfg, block: NodeIndex) -> HashMap<usize, HashSet<R>> {
+        let ins = &g[block].ins;
+
+        // outs for each ins i
+        let mut map = HashMap::new();
+        let mut current_out = self.out_f[&block].clone();
+        for (i, ins) in ins.iter().enumerate().rev() {
+            map.insert(i, current_out.clone());
+
+            // kill
+            for r in vars_written(ins) {
+                current_out.remove(&r);
+            }
+
+            // gen
+            current_out.extend(vars_read(ins));
+        }
+
+        map
+    }
+
     fn new(g: &Cfg) -> Self {
         let in_f = g.node_indices().map(|n| (n, HashSet::new())).collect();
         let out_f = g.node_indices().map(|n| (n, HashSet::new())).collect();
@@ -184,50 +713,8 @@ impl LiveVariables {
             let mut lkill = HashSet::new();
 
             for ins in &g[n].ins {
-                match *ins {
-                    Inst::Add(a, b, c) => {
-                        if !lkill.contains(&b) {
-                            lgen.insert(b);
-                        }
-                        if !lkill.contains(&c) {
-                            lgen.insert(c);
-                        }
-                        lkill.insert(a);
-                    }
-                    Inst::Mult(a, b, c) => {
-                        if !lkill.contains(&b) {
-                            lgen.insert(b);
-                        }
-                        if !lkill.contains(&c) {
-                            lgen.insert(c);
-                        }
-                        lkill.insert(a);
-                    }
-                    Inst::Assign(a, b) => {
-                        if !lkill.contains(&b) {
-                            lgen.insert(b);
-                        }
-                        lkill.insert(a);
-                    }
-                    Inst::AssignFrom(a, b) => {
-                        // if !lkill.contains(&b) {lgen.insert(b);}
-                        lkill.insert(a);
-                    }
-                    Inst::AssignTo(a, b) => { /*lkill.insert(a);*/ }
-                    Inst::Call(_) => {}
-                    Inst::Jmp(_) => {}
-                    Inst::Load(a, _) => {
-                        lkill.insert(a);
-                    }
-                    Inst::Test(a, b) => {
-                        if !lkill.contains(&a) {
-                            lgen.insert(a);
-                        }
-                        if !lkill.contains(&b) {
-                            lgen.insert(b);
-                        }
-                    }
-                }
+                lgen.extend(vars_read(ins).difference(&lkill));
+                lkill.extend(vars_written(ins));
             }
 
             gen.insert(n, lgen);
@@ -256,10 +743,7 @@ impl dataflow::Analysis for LiveVariables {
     type State = Lvstate;
 
     fn from(state: Self::State) -> Self {
-        LiveVariables {
-            in_f: state.in_f,
-            out_f: state.out_f,
-        }
+        LiveVariables { out_f: state.out_f }
     }
 }
 
@@ -286,12 +770,38 @@ impl dataflow::State for Lvstate {
 }
 
 struct ReachingDefs {
-    // defs: HashMap<R, Vec<InsIdx>>,
     reach_in: HashMap<NodeIndex, HashSet<InsIdx>>,
-    reach_out: HashMap<NodeIndex, HashSet<InsIdx>>,
+    defs: HashMap<R, HashSet<InsIdx>>,
 }
 
 impl ReachingDefs {
+    fn internal_analysis(&self, g: &Cfg, bb: NodeIndex) -> HashMap<usize, HashSet<InsIdx>> {
+        let ins = &g[bb].ins;
+
+        let mut map = HashMap::new();
+        let mut current_out = self.reach_in[&bb].clone();
+        for (i, ins) in ins.iter().enumerate() {
+            let mut gen = false;
+
+            // kill
+            for r in vars_written(ins).into_iter().filter(|r| !r.is_pinned()) {
+                gen = true;
+                for ins_idx in &self.defs[&r] {
+                    current_out.remove(&ins_idx);
+                }
+            }
+
+            // gen
+            if gen {
+                current_out.insert((bb, i));
+            }
+
+            map.insert(i, current_out.clone());
+        }
+
+        map
+    }
+
     fn new(g: &Cfg) -> Self {
         let mut defs = HashMap::new();
         let mut r_in = HashMap::new();
@@ -302,7 +812,7 @@ impl ReachingDefs {
             r_out.insert(n, HashSet::new());
 
             for (i, ins) in g[n].ins.iter().enumerate() {
-                if let Some(r) = def_of(ins) {
+                for r in vars_written(ins) {
                     defs.entry(r).or_insert(HashSet::new()).insert((n, i));
                 }
             }
@@ -316,12 +826,17 @@ impl ReachingDefs {
                         .ins
                         .iter()
                         .enumerate()
-                        .filter_map(|(i, ins)| def_of(ins).map(|_| (n, i)))
+                        .filter(|&(_, ins)| {
+                            vars_written(ins)
+                                .into_iter()
+                                .filter(|r| !r.is_pinned())
+                                .count() != 0
+                        })
+                        .map(|(i, _)| (n, i))
                         .collect(),
                 )
             })
             .collect();
-
 
         let kill = g.node_indices()
             .map(|n| {
@@ -331,9 +846,17 @@ impl ReachingDefs {
                     g[n]
                         .ins
                         .iter()
-                        .filter_map(def_of)
-                        .flat_map(|r| {
-                            defs[&r].iter().cloned().filter(|def| !gen.contains(def))
+                        .filter_map(|ins| {
+                            let vw: HashSet<R> = vars_written(ins)
+                                .into_iter()
+                                .filter(|r| !r.is_pinned())
+                                .collect();
+                            if vw.is_empty() { None } else { Some(vw) }
+                        })
+                        .flat_map(|r_set| {
+                            r_set.into_iter().flat_map(|r| {
+                                defs[&r].iter().cloned().filter(|def| !gen.contains(def))
+                            })
                         })
                         .collect(),
                 )
@@ -345,13 +868,10 @@ impl ReachingDefs {
             kill,
             in_f: r_in,
             out_f: r_out,
+            defs,
         };
 
         dataflow::analyze(g, init, Forward, May)
-    }
-
-    fn get(&self, ins: InsIdx) -> Vec<InsIdx> {
-        unimplemented!()
     }
 }
 
@@ -361,7 +881,7 @@ impl dataflow::Analysis for ReachingDefs {
     fn from(state: Self::State) -> Self {
         ReachingDefs {
             reach_in: state.in_f,
-            reach_out: state.out_f,
+            defs: state.defs,
         }
     }
 }
@@ -371,6 +891,7 @@ struct Rdstate {
     kill: HashMap<NodeIndex, HashSet<InsIdx>>,
     in_f: HashMap<NodeIndex, HashSet<InsIdx>>,
     out_f: HashMap<NodeIndex, HashSet<InsIdx>>,
+    defs: HashMap<R, HashSet<InsIdx>>,
 }
 
 impl dataflow::State for Rdstate {
@@ -392,21 +913,6 @@ impl dataflow::State for Rdstate {
 
     fn out_facts(&mut self, i: Self::NodeIdx) -> &mut Self::Set {
         self.out_f.get_mut(&i).unwrap()
-    }
-}
-
-fn def_of(ins: &Inst) -> Option<R> {
-    match *ins {
-        Inst::Add(r, ..) |
-        Inst::Assign(r, _) |
-        Inst::AssignFrom(r, _) |
-        Inst::Load(r, _) |
-        Inst::Mult(r, ..) => Some(r),
-
-        Inst::AssignTo(..) |
-        Inst::Call(..) |
-        Inst::Jmp(..) |
-        Inst::Test(..) => None,
     }
 }
 
@@ -439,8 +945,8 @@ fn c_statement(
             }
             Statement::Print(ref e) => {
                 let (node, r) = c_expr(e, g, names);
-                let mut block = block(Inst::AssignTo("rdi", r));
-                block.ins.push(Inst::Call("print"));
+                let mut block = block(Inst::AssignTo(Pinned::Rdi, r));
+                block.ins.push(Inst::Call("print", 1));
                 let this = g.add_node(block);
                 g.add_edge(node, this, "print");
                 (node, this, false)
@@ -613,13 +1119,16 @@ fn c_expr(e: &Expr, g: &mut Cfg, names: &HashMap<String, R>) -> (NodeIndex, R) {
         Expr::Var(ref s) => {
             // let r = fresh();
             let b = names[s];
-            let this = g.add_node(/*block(Inst::Assign(r, b))*/empty_block());
+            let this = g.add_node(
+                /*block(Inst::Assign(r, b))*/
+                empty_block(),
+            );
             (this, b)
         }
         Expr::Read => {
             let r = fresh();
-            let mut block = block(Inst::Call("read"));
-            block.ins.push(Inst::AssignFrom(r, "rax"));
+            let mut block = block(Inst::Call("read", 0));
+            block.ins.push(Inst::AssignFrom(r, Pinned::Rax));
             let node = g.add_node(block);
             (node, r)
         }
@@ -641,218 +1150,320 @@ fn empty_block() -> Block {
     }
 }
 
-fn print_graph(g: &Cfg) {
-    let mut gg = Graph::new();
-    let mut map = HashMap::new();
 
-    for i in g.node_indices() {
-        let new_node = gg.add_node(g[i].clone());
-        map.insert(i, new_node);
+fn link_builtins(asm: &mut StringBuilder) {
+    asm.extend(
+        "print:
+    push r12
+    mov rcx, 10
+    mov rax, rdi
+    mov rsi, rdi
+    shr rdi, 63
+__print_loop1:
+    inc rdi
+    cqo
+    idiv rcx
+    test rax, rax
+    jnz __print_loop1
+    inc rdi
+    mov rax, rsi
+    mov r8, 8
+    mov r12, rdi
+    and r12, 65520
+    cmp r8, r12
+    cmova r12, r8
+    sub rsp, r12
+    dec rdi
+    test rax, rax
+    jns __print_skip_neg
+    mov byte [rsp + 0], 45
+__print_skip_neg:
+    mov r9, rdi
+__print_loop2:
+    dec r9
+    cqo
+    idiv rcx
+    mov r8, rdx
+    sar r8b, 7
+    xor dl, r8b
+    sub dl, r8b
+    add dl, 48
+    mov [rsp + r9], dl
+    test rax, rax
+    jnz __print_loop2
+    mov byte [rsp + rdi], 10
+    inc rdi
+    mov rdx, rdi
+    mov rax, 1
+    mov rdi, 1
+    mov rsi, rsp
+    syscall
+    add rsp, r12
+    pop r12
+    ret
+exit:
+    mov rax, 60
+    xor rdi, rdi
+    syscall",
+    );
+}
+
+
+struct StringBuilder {
+    string: String,
+    indent_level: u32,
+}
+
+impl StringBuilder {
+    fn into(self) -> String {
+        self.string
     }
-
-
-    for i in g.node_indices() {
-        for n in g.neighbors(i) {
-            let e = g.find_edge(i, n).unwrap();
-            let s = map[&i];
-            let t = map[&n];
-            gg.add_edge(s, t, g[e]);
+    fn new() -> Self {
+        StringBuilder {
+            string: String::new(),
+            indent_level: 0,
         }
     }
+
+    fn line<S>(&mut self, s: S)
+    where
+        S: AsRef<str>,
+    {
+        for _ in 0..self.indent_level * 4 {
+            self.string.push(' ');
+        }
+        self.string.push_str(s.as_ref());
+        self.string.push('\n');
+    }
+
+    fn label<S>(&mut self, s: S)
+    where
+        S: AsRef<str>,
+    {
+        self.string.push_str(s.as_ref());
+        self.string.push_str(":\n");
+    }
+
+    fn extend<S>(&mut self, s: S)
+    where
+        S: AsRef<str>,
+    {
+        self.string += s.as_ref();
+    }
+
+    fn indent(&mut self) {
+        self.indent_level += 1;
+    }
+
+    fn unindent(&mut self) {
+        self.indent_level = self.indent_level.checked_sub(1).unwrap();
+    }
+}
+
+
+trait AsGraph<N, E, D> {
+    fn as_graph(&self) -> Graph<N, E, D>;
+}
+
+impl<N: Clone, E: Clone, D: pg::EdgeType> AsGraph<N, E, D>
+    for pg::stable_graph::StableGraph<N, E, D> {
+    fn as_graph(&self) -> Graph<N, E, D> {
+        let mut gg: Graph<N, E, D> = Graph::new().into_edge_type();
+        let mut map = HashMap::new();
+
+        for i in self.node_indices() {
+            let new_node = gg.add_node(self[i].clone());
+            map.insert(i, new_node);
+        }
+
+        for i in self.node_indices() {
+            for n in self.neighbors(i) {
+                let e = self.find_edge(i, n).unwrap();
+                let s = map[&i];
+                let t = map[&n];
+                gg.add_edge(s, t, self[e].clone());
+            }
+        }
+        gg
+    }
+}
+
+impl<N: Clone, E: Clone, D: pg::EdgeType> AsGraph<N, E, D> for Graph<N, E, D> {
+    fn as_graph(&self) -> Graph<N, E, D> {
+        (*self).clone()
+    }
+}
+
+fn print_graph<N, E, D>(g: &AsGraph<N, E, D>)
+where
+    N: Display,
+    E: Display,
+    D: pg::EdgeType,
+{
+    let gg = g.as_graph();
 
     let dot = pg::dot::Dot::new(&gg);
     println!("{:#}", dot);
 }
 
 
-fn print_reaching(rd: &ReachingDefs) {
-    let mut nodes: Vec<_> = rd.reach_in.keys().collect();
+fn print_reaching(g: &Cfg, rd: &ReachingDefs) {
+    let mut nodes: Vec<_> = rd.reach_in.keys().cloned().collect();
     nodes.sort();
 
     for n in nodes {
-        let mut i = rd.reach_in[&n]
-            .iter()
-            .map(|&(i, a)| (i.index(), a))
-            .collect::<Vec<_>>();
-        let mut o = rd.reach_out[&n]
-            .iter()
-            .map(|&(i, a)| (i.index(), a))
-            .collect::<Vec<_>>();
+        println!("Node {}", n.index());
+        let mut a: Vec<(usize, _)> = rd.internal_analysis(g, n).into_iter().collect();
+        a.sort_by_key(|&(k, _)| k);
 
-        i.sort_by(|&(n1, i1), &(n2, i2)| n1.cmp(&n2).then(i1.cmp(&i2)));
-        o.sort_by(|&(n1, i1), &(n2, i2)| n1.cmp(&n2).then(i1.cmp(&i2)));
-
-        println!("{}: ", n.index());
-        println!("In: {:?}", i);
-        println!("Out: {:?}", o);
-        println!();
-    }
-}
-
-fn print_live(rd: &LiveVariables) {
-    let mut nodes: Vec<_> = rd.in_f.keys().collect();
-    nodes.sort();
-
-    for n in nodes {
-        let mut i = rd.in_f[&n]
-            .iter().cloned()
-            .collect::<Vec<_>>();
-        let mut o = rd.out_f[&n]
-            .iter().cloned()
-            .collect::<Vec<_>>();
-
-        i.sort_by(|r1, r2| r1.cmp(&r2));
-        o.sort_by(|r1, r2| r1.cmp(&r2));
-
-        println!("{}: ", n.index());
-        println!("In: {:?}", i);
-        println!("Out: {:?}", o);
-        println!();
-    }
-}
-
-
-
-#[derive(Debug)]
-pub struct Code {
-    entry: NodeIndex,
-    ir: Graph<Ir, Edge>,
-    fns: HashMap<String, NodeIndex>,
-    label_counter: usize,
-}
-
-impl Code {
-    fn make_fn_available<S>(&mut self, s: S, f: fn() -> Ir)
-    where
-        S: Into<String>,
-    {
-        let s = s.into();
-
-        if !self.fns.contains_key(&s) {
-            let idx = self.ir.add_node(f());
-            self.fns.insert(s, idx);
-        }
-    }
-
-    pub fn assemble(&self) -> String {
-        let mut p = StringBuilder::new();
-
-        p.indent();
-        p.line("bits 64");
-        p.line("global _start");
-
-        let mut data = StringBuilder::new();
-        data.indent();
-        data.line("section .data");
-
-        let mut text = StringBuilder::new();
-        text.indent();
-        text.line("section .text");
-
-        splice_graph(&self.ir, self.entry, &mut text);
-
-        let mut p = p.into();
-        p += &*data.into();
-        p += &*text.into();
-        p
-    }
-}
-
-fn splice_graph(g: &Graph<Ir, Edge>, entry: NodeIndex, block: &mut StringBuilder) {
-    if g.node_count() == 0 {
-        return;
-    }
-
-    let mut visited = HashSet::new();
-    let mut stack = vec![entry];
-
-    while let Some(i) = stack.pop() {
-        if visited.contains(&i) {
-            continue;
-        }
-
-        visited.insert(i);
-
-        let node = &g[i];
-
-        match *node {
-            Ir::BB(ref bb) => {
-                compile_bb(bb, block);
-            }
-            Ir::Graph(ref g) => {
-                splice_graph(g, NodeIndex::new(0), block);
-            }
-        }
-
-
-        for i in g.edges(i) {
-            stack.push(i.target());
+        for (i, set) in a {
+            let mut set: Vec<_> = set.into_iter().collect();
+            set.sort_by(|&(n1, i1), &(n2, i2)| n1.cmp(&n2).then(i1.cmp(&i2)));
+            println!("  {}: {:?}", i, set);
         }
     }
 }
 
-fn compile_bb(bb: &BB, block: &mut StringBuilder) {
-    let BB { ref label, ref ins } = *bb;
-    block.label(label);
-    for ins in ins {
-        compile_ins(*ins, block);
-    }
-}
+// #[derive(Debug)]
+// pub struct Code {
+//     entry: NodeIndex,
+//     ir: Graph<Ir, Edge>,
+//     fns: HashMap<String, NodeIndex>,
+//     label_counter: usize,
+// }
 
-fn compile_ins(ins: Ins, block: &mut StringBuilder) {
-    match ins {
-        Ins::AddImmI64(reg, val) => block.line(format!("add {}, {}", reg, val)),
-        Ins::SubImmI64(reg, val) => block.line(format!("sub {}, {}", reg, val)),
-        Ins::Push(reg) => block.line(format!("push {}", reg)),
-        Ins::Pop(reg) => block.line(format!("pop {}", reg)),
-        Ins::LoadImmI64(reg, val) => block.line(format!("mov {}, {}", reg, val)),
-        Ins::MovRegReg(dest, src) => block.line(format!("mov {}, {}", dest, src)),
-        Ins::Store(store) => {
-            match store {
-                Store::ImmReg { base, offset, src } => {
-                    block.line(format!("mov [{} + {}], {}", base, offset, src));
-                }
-                Store::RegReg { base, offset, src } => {
-                    block.line(format!("mov [{} + {}], {}", base, offset, src));
-                }
-                Store::RegImm {
-                    base,
-                    offset,
-                    val,
-                    size,
-                } => {
-                    block.line(format!("mov {} [{} + {}], {}", size, base, offset, val));
-                }
-                Store::ImmImm {
-                    base,
-                    offset,
-                    val,
-                    size,
-                } => {
-                    block.line(format!("mov {} [{} + {}], {}", size, base, offset, val));
-                }
-            }
-        }
-        Ins::Syscall => block.line("syscall"),
-        Ins::Call(s) => block.line(format!("call {}", s)),
-        Ins::Ret => block.line("ret"),
-        Ins::J(cc, label) => block.line(format!("j{} {}", cc, label)),
-        Ins::Xor(dest, src) => block.line(format!("xor {}, {}", dest, src)),
-        Ins::Cqo => block.line("cqo"),
-        Ins::Idiv(reg) => block.line(format!("idiv {}", reg)),
-        Ins::Inc(reg) => block.line(format!("inc {}", reg)),
-        Ins::Dec(reg) => block.line(format!("dec {}", reg)),
-        Ins::ShrImm(reg, v) => block.line(format!("shr {}, {}", reg, v)),
-        Ins::Test(a, b) => block.line(format!("test {}, {}", a, b)),
-        Ins::AndImm(a, b) => block.line(format!("and {}, {}", a, b)),
-        Ins::Cmov(cc, a, b) => block.line(format!("cmov{} {}, {}", cc, a, b)),
-        Ins::SarImm(a, b) => block.line(format!("sar {}, {}", a, b)),
-        Ins::Cmp(a, b) => block.line(format!("cmp {}, {}", a, b)),
-        Ins::Sub(a, b) => block.line(format!("sub {}, {}", a, b)),
-        Ins::Add(a, b) => block.line(format!("add {}, {}", a, b)),
-        Ins::Imul(a, b) => block.line(format!("imul {}, {}", a, b)),
-    }
-}
+// impl Code {
+//     fn make_fn_available<S>(&mut self, s: S, f: fn() -> Ir)
+//     where
+//         S: Into<String>,
+//     {
+//         let s = s.into();
+
+//         if !self.fns.contains_key(&s) {
+//             let idx = self.ir.add_node(f());
+//             self.fns.insert(s, idx);
+//         }
+//     }
+
+//     pub fn assemble(&self) -> String {
+//         let mut p = StringBuilder::new();
+
+//         p.indent();
+//         p.line("bits 64");
+//         p.line("global _start");
+
+//         let mut data = StringBuilder::new();
+//         data.indent();
+//         data.line("section .data");
+
+//         let mut text = StringBuilder::new();
+//         text.indent();
+//         text.line("section .text");
+
+//         splice_graph(&self.ir, self.entry, &mut text);
+
+//         let mut p = p.into();
+//         p += &*data.into();
+//         p += &*text.into();
+//         p
+//     }
+// }
+
+// fn splice_graph(g: &Graph<Ir, Edge>, entry: NodeIndex, block: &mut StringBuilder) {
+//     if g.node_count() == 0 {
+//         return;
+//     }
+
+//     let mut visited = HashSet::new();
+//     let mut stack = vec![entry];
+
+//     while let Some(i) = stack.pop() {
+//         if visited.contains(&i) {
+//             continue;
+//         }
+
+//         visited.insert(i);
+
+//         let node = &g[i];
+
+//         match *node {
+//             Ir::BB(ref bb) => {
+//                 compile_bb(bb, block);
+//             }
+//             Ir::Graph(ref g) => {
+//                 splice_graph(g, NodeIndex::new(0), block);
+//             }
+//         }
+
+
+//         for i in g.edges(i) {
+//             stack.push(i.target());
+//         }
+//     }
+// }
+
+// fn compile_bb(bb: &BB, block: &mut StringBuilder) {
+//     let BB { ref label, ref ins } = *bb;
+//     block.label(label);
+//     for ins in ins {
+//         compile_ins(*ins, block);
+//     }
+// }
+
+// fn compile_ins(ins: Ins, block: &mut StringBuilder) {
+//     match ins {
+//         Ins::AddImmI64(reg, val) => block.line(format!("add {}, {}", reg, val)),
+//         Ins::SubImmI64(reg, val) => block.line(format!("sub {}, {}", reg, val)),
+//         Ins::Push(reg) => block.line(format!("push {}", reg)),
+//         Ins::Pop(reg) => block.line(format!("pop {}", reg)),
+//         Ins::LoadImmI64(reg, val) => block.line(format!("mov {}, {}", reg, val)),
+//         Ins::MovRegReg(dest, src) => block.line(format!("mov {}, {}", dest, src)),
+//         Ins::Store(store) => {
+//             match store {
+//                 Store::ImmReg { base, offset, src } => {
+//                     block.line(format!("mov [{} + {}], {}", base, offset, src));
+//                 }
+//                 Store::RegReg { base, offset, src } => {
+//                     block.line(format!("mov [{} + {}], {}", base, offset, src));
+//                 }
+//                 Store::RegImm {
+//                     base,
+//                     offset,
+//                     val,
+//                     size,
+//                 } => {
+//                     block.line(format!("mov {} [{} + {}], {}", size, base, offset, val));
+//                 }
+//                 Store::ImmImm {
+//                     base,
+//                     offset,
+//                     val,
+//                     size,
+//                 } => {
+//                     block.line(format!("mov {} [{} + {}], {}", size, base, offset, val));
+//                 }
+//             }
+//         }
+//         Ins::Syscall => block.line("syscall"),
+//         Ins::Call(s) => block.line(format!("call {}", s)),
+//         Ins::Ret => block.line("ret"),
+//         Ins::J(cc, label) => block.line(format!("j{} {}", cc, label)),
+//         Ins::Xor(dest, src) => block.line(format!("xor {}, {}", dest, src)),
+//         Ins::Cqo => block.line("cqo"),
+//         Ins::Idiv(reg) => block.line(format!("idiv {}", reg)),
+//         Ins::Inc(reg) => block.line(format!("inc {}", reg)),
+//         Ins::Dec(reg) => block.line(format!("dec {}", reg)),
+//         Ins::ShrImm(reg, v) => block.line(format!("shr {}, {}", reg, v)),
+//         Ins::Test(a, b) => block.line(format!("test {}, {}", a, b)),
+//         Ins::AndImm(a, b) => block.line(format!("and {}, {}", a, b)),
+//         Ins::Cmov(cc, a, b) => block.line(format!("cmov{} {}, {}", cc, a, b)),
+//         Ins::SarImm(a, b) => block.line(format!("sar {}, {}", a, b)),
+//         Ins::Cmp(a, b) => block.line(format!("cmp {}, {}", a, b)),
+//         Ins::Sub(a, b) => block.line(format!("sub {}, {}", a, b)),
+//         Ins::Add(a, b) => block.line(format!("add {}, {}", a, b)),
+//         Ins::Imul(a, b) => block.line(format!("imul {}, {}", a, b)),
+//     }
+// }
 
 
 // #[derive(Debug, PartialEq)]
@@ -861,107 +1472,107 @@ fn compile_ins(ins: Ins, block: &mut StringBuilder) {
 //     Adj,
 // }
 
-#[derive(Debug, Copy, Clone)]
-pub enum Size {
-    Byte,
-}
+// #[derive(Debug, Copy, Clone)]
+// pub enum Size {
+//     Byte,
+// }
 
-impl Display for Size {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        let s = match *self {
-            Size::Byte => "byte",
-        };
-        write!(f, "{}", s)
-    }
-}
+// impl Display for Size {
+//     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+//         let s = match *self {
+//             Size::Byte => "byte",
+//         };
+//         write!(f, "{}", s)
+//     }
+// }
 
-#[derive(Debug, Copy, Clone)]
-pub enum Store {
-    ImmReg { base: Reg, offset: i64, src: Reg },
-    RegReg { base: Reg, offset: Reg, src: Reg },
-    RegImm {
-        base: Reg,
-        offset: Reg,
-        val: i64,
-        size: Size,
-    },
-    ImmImm {
-        base: Reg,
-        offset: i64,
-        val: i64,
-        size: Size,
-    },
-}
+// #[derive(Debug, Copy, Clone)]
+// pub enum Store {
+//     ImmReg { base: Reg, offset: i64, src: Reg },
+//     RegReg { base: Reg, offset: Reg, src: Reg },
+//     RegImm {
+//         base: Reg,
+//         offset: Reg,
+//         val: i64,
+//         size: Size,
+//     },
+//     ImmImm {
+//         base: Reg,
+//         offset: i64,
+//         val: i64,
+//         size: Size,
+//     },
+// }
 
-#[derive(Debug, Copy, Clone)]
-pub enum Ins {
-    // TODO: remove most of this, make it abstract, this is the IR after all
-    LoadImmI64(Reg, i64),
-    Store(Store),
-    Push(Reg),
-    AddImmI64(Reg, i64),
-    SubImmI64(Reg, i64),
-    MovRegReg(Reg, Reg),
-    Syscall,
-    Call(&'static str),
-    Ret,
-    Xor(Reg, Reg),
-    ShrImm(Reg, i64),
-    Inc(Reg),
-    Dec(Reg),
-    Cqo,
-    Idiv(Reg),
-    Test(Reg, Reg),
-    J(&'static str, &'static str),
-    AndImm(Reg, i64),
-    Cmp(Reg, Reg),
-    Cmov(&'static str, Reg, Reg),
-    Sub(Reg, Reg),
-    SarImm(Reg, i64),
-    Add(Reg, Reg),
-    Pop(Reg),
-    Imul(Reg, Reg),
-}
+// #[derive(Debug, Copy, Clone)]
+// pub enum Ins {
+//     // TODO: remove most of this, make it abstract, this is the IR after all
+//     LoadImmI64(Reg, i64),
+//     Store(Store),
+//     Push(Reg),
+//     AddImmI64(Reg, i64),
+//     SubImmI64(Reg, i64),
+//     MovRegReg(Reg, Reg),
+//     Syscall,
+//     Call(&'static str),
+//     Ret,
+//     Xor(Reg, Reg),
+//     ShrImm(Reg, i64),
+//     Inc(Reg),
+//     Dec(Reg),
+//     Cqo,
+//     Idiv(Reg),
+//     Test(Reg, Reg),
+//     J(&'static str, &'static str),
+//     AndImm(Reg, i64),
+//     Cmp(Reg, Reg),
+//     Cmov(&'static str, Reg, Reg),
+//     Sub(Reg, Reg),
+//     SarImm(Reg, i64),
+//     Add(Reg, Reg),
+//     Pop(Reg),
+//     Imul(Reg, Reg),
+// }
 
-#[derive(Debug, Copy, Clone)]
-pub enum Reg {
-    Pinned(&'static str),
-    Sym(u32),
-}
+// #[derive(Debug, Copy, Clone)]
+// pub enum Reg {
+//     Pinned(&'static str),
+//     Sym(u32),
+// }
 
-fn pinned(s: &'static str) -> Reg {
-    Reg::Pinned(s)
-}
+// fn pinned(s: &'static str) -> Reg {
+//     Reg::Pinned(s)
+// }
 
 fn fresh() -> R {
     use std::sync::atomic::*;
     static COUNTER: AtomicUsize = ATOMIC_USIZE_INIT;
 
-    R(COUNTER.fetch_add(1, Ordering::SeqCst) as u32)
+    R::R(COUNTER.fetch_add(1, Ordering::SeqCst) as u32)
 }
 
-impl Display for Reg {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        let s = match *self {
-            Reg::Sym(n) => format!("${}", n),
-            Reg::Pinned(s) => s.into(),
-        };
+// impl Display for Reg {
+//     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+//         let s = match *self {
+//             Reg::Sym(n) => format!("${}", n),
+//             Reg::Pinned(s) => s.into(),
+//         };
 
-        write!(f, "{}", s)
-    }
-}
+//         write!(f, "{}", s)
+//     }
+// }
 
-#[derive(Debug)]
-pub enum Ir {
-    BB(BB),
-    Graph(Graph<Ir, Edge>),
-}
+// #[derive(Debug)]
+// pub enum Ir {
+//     BB(BB),
+//     Graph(Graph<Ir, Edge>),
+// }
 
-#[derive(Debug)]
-pub struct BB {
-    label: String,
-    ins: Vec<Ins>,
-}
+// #[derive(Debug)]
+// pub struct BB {
+//     label: String,
+//     ins: Vec<Ins>,
+// }
 
 // pub fn compile(p: &Program) -> Code {
 //     let mut code = Code {
@@ -1144,66 +1755,15 @@ pub struct BB {
 //     Ir::Graph(g)
 // }
 
-fn compile_exit() -> Ir {
-    let mut ins = vec![];
+// fn compile_exit() -> Ir {
+//     let mut ins = vec![];
 
-    ins.push(Ins::LoadImmI64(pinned("rax"), 60));
-    ins.push(Ins::Xor(pinned("rdi"), pinned("rdi")));
-    ins.push(Ins::Syscall);
+//     ins.push(Ins::LoadImmI64(pinned("rax"), 60));
+//     ins.push(Ins::Xor(pinned("rdi"), pinned("rdi")));
+//     ins.push(Ins::Syscall);
 
-    Ir::BB(BB {
-        label: "exit:".into(),
-        ins,
-    })
-}
-
-struct StringBuilder {
-    string: String,
-    indent_level: u32,
-}
-
-impl StringBuilder {
-    fn into(self) -> String {
-        self.string
-    }
-    fn new() -> Self {
-        StringBuilder {
-            string: String::new(),
-            indent_level: 0,
-        }
-    }
-
-    fn line<S>(&mut self, s: S)
-    where
-        S: AsRef<str>,
-    {
-        for _ in 0..self.indent_level * 4 {
-            self.string.push(' ');
-        }
-        self.string.push_str(s.as_ref());
-        self.string.push('\n');
-    }
-
-    fn label<S>(&mut self, s: S)
-    where
-        S: AsRef<str>,
-    {
-        self.string.push_str(s.as_ref());
-        self.string.push('\n');
-    }
-
-    fn extend<S>(&mut self, s: S)
-    where
-        S: AsRef<str>,
-    {
-        self.string += s.as_ref();
-    }
-
-    fn indent(&mut self) {
-        self.indent_level += 1;
-    }
-
-    fn unindent(&mut self) {
-        self.indent_level = self.indent_level.checked_sub(1).unwrap();
-    }
-}
+//     Ir::BB(BB {
+//         label: "exit:".into(),
+//         ins,
+//     })
+// }
