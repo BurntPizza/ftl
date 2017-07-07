@@ -2,6 +2,7 @@
 use pg::prelude::{NodeIndex, Graph};
 
 use ::*;
+use ast::*;
 
 use std::fmt::{self, Display, Debug, Formatter};
 use std::collections::{HashMap, HashSet};
@@ -127,8 +128,6 @@ pub enum Inst {
     Call(&'static str, usize),
     Jmp(&'static str),
 }
-
-pub enum Instruction {}
 
 type Edge = &'static str;
 

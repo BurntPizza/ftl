@@ -1,12 +1,12 @@
 use std::str::FromStr;
-use ::*;
+use ast::*;
 extern crate lalrpop_util as __lalrpop_util;
 
 mod __parse__program {
     #![allow(non_snake_case, non_camel_case_types, unused_mut, unused_variables, unused_imports)]
 
     use std::str::FromStr;
-    use ::*;
+    use ast::*;
     extern crate lalrpop_util as __lalrpop_util;
     #[allow(dead_code)]
     pub enum __Symbol<'input> {
@@ -1438,7 +1438,7 @@ pub use self::__parse__program::parse_program;
 mod __intern_token {
     #![allow(unused_imports)]
     use std::str::FromStr;
-    use ::*;
+    use ast::*;
     extern crate lalrpop_util as __lalrpop_util;
     extern crate regex as __regex;
     pub struct __Matcher<'input> {
