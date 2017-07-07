@@ -2,15 +2,14 @@
 use std::fmt::{Display};
 use std::collections::HashMap;
 
-use ::pg;
-use pg::Graph;
+use petgraph::{stable_graph, dot, Graph, EdgeType};
 
 pub trait AsGraph<N, E, D> {
     fn as_graph(&self) -> Graph<N, E, D>;
 }
 
-impl<N: Clone, E: Clone, D: pg::EdgeType> AsGraph<N, E, D>
-    for pg::stable_graph::StableGraph<N, E, D> {
+impl<N: Clone, E: Clone, D: EdgeType> AsGraph<N, E, D>
+    for stable_graph::StableGraph<N, E, D> {
     fn as_graph(&self) -> Graph<N, E, D> {
         let mut gg: Graph<N, E, D> = Graph::new().into_edge_type();
         let mut map = HashMap::new();
@@ -32,7 +31,7 @@ impl<N: Clone, E: Clone, D: pg::EdgeType> AsGraph<N, E, D>
     }
 }
 
-impl<N: Clone, E: Clone, D: pg::EdgeType> AsGraph<N, E, D> for Graph<N, E, D> {
+impl<N: Clone, E: Clone, D: EdgeType> AsGraph<N, E, D> for Graph<N, E, D> {
     fn as_graph(&self) -> Graph<N, E, D> {
         (*self).clone()
     }
@@ -42,10 +41,10 @@ pub fn print_graph<N, E, D>(g: &AsGraph<N, E, D>)
 where
     N: Display,
     E: Display,
-    D: pg::EdgeType,
+    D: EdgeType,
 {
     let gg = g.as_graph();
 
-    let dot = pg::dot::Dot::new(&gg);
+    let dot = dot::Dot::new(&gg);
     println!("{:#}", dot);
 }
