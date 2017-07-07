@@ -1,0 +1,12 @@
+
+// OUT 1
+
+let x = 1;
+while (x) {
+  switch x {
+    case 2: { print 4; break; }
+    case 4: { print 8; break; }
+    default: { print x; break; }
+  }
+  x = x + -1;
+}

@@ -1,6 +1,6 @@
 
 use pg::prelude::{NodeIndex, Graph};
-
+use strum::IntoEnumIterator;
 use ::*;
 use ast::*;
 
@@ -34,6 +34,12 @@ pub enum R {
 }
 
 impl R {
+    pub fn is_sym(&self) -> bool {
+        match *self {
+            R::R(_) => true,
+            _ => false,
+        }
+    }
     pub fn is_const(&self) -> bool {
         match *self {
             R::Const(_) => true,
@@ -131,7 +137,7 @@ pub enum Inst {
 
 type Edge = &'static str;
 
-pub fn compile(ast: &Program) -> String {
+pub fn compile(ast: &Program) -> Cfg {
     let mut g = Cfg::new();
     let mut names = HashMap::new();
     let mut label_exits = HashMap::new();
@@ -159,11 +165,13 @@ pub fn compile(ast: &Program) -> String {
 
     const_prop(&mut g, defs, uses);
 
-    // print_graph(&g);
-    // return "".into();
+    g
+}
 
+pub fn codegen(mut g: Cfg) -> String {
     let lv = LiveVariables::new(&g);
-    let ra = allocate_registers(&g, &lv);
+    let ig = interference_graph(&g, &lv);
+    let ra = allocate_registers(ig);
 
     // apply register allocation
     let start = g.node_indices().next().unwrap();
@@ -196,13 +204,11 @@ pub fn compile(ast: &Program) -> String {
                         *b = R::Pin(ra[b]);
                     }
                 }
-                &mut Inst::AssignFrom(ref mut a, ref mut b) => {
+                &mut Inst::AssignFrom(ref mut a, _) => {
                     assert!(!a.is_const());
                     *a = R::Pin(ra[a]);
-                    debug_assert_eq!(*b, ra[&R::Pin(*b)]);
                 }
-                &mut Inst::AssignTo(ref mut a, ref mut b) => {
-                    debug_assert_eq!(*a, ra[&R::Pin(*a)]);
+                &mut Inst::AssignTo(_, ref mut b) => {
                     if !b.is_const() {
                         *b = R::Pin(ra[b]);
                     }
@@ -227,18 +233,16 @@ pub fn compile(ast: &Program) -> String {
         }
     }
 
-    let mut p = StringBuilder::new();
+    // emit
 
-    p.indent();
+    let mut p = StringBuilder::new();
     p.line("bits 64");
     p.line("global _start");
 
     let mut data = StringBuilder::new();
-    data.indent();
     data.line("section .data");
 
     let mut text = StringBuilder::new();
-    text.indent();
     text.line("section .text");
     text.label("_start");
 
@@ -330,7 +334,7 @@ fn const_prop(
     {
         for (n, i) in uses {
             match g[n].ins.get_mut(i).unwrap() {
-                &mut Inst::Add(ref mut a, ref mut b, ref mut c) => {
+                &mut Inst::Add(_, ref mut b, ref mut c) => {
                     if *b == r {
                         *b = R::Const(val);
                     }
@@ -346,17 +350,17 @@ fn const_prop(
                         *b = R::Const(val);
                     }
                 }
-                &mut Inst::Assign(ref mut a, ref mut b) => {
+                &mut Inst::Assign(_, ref mut b) => {
                     if *b == r {
                         *b = R::Const(val);
                     }
                 }
-                &mut Inst::AssignTo(ref mut a, ref mut b) => {
+                &mut Inst::AssignTo(_, ref mut b) => {
                     if *b == r {
                         *b = R::Const(val);
                     }
                 }
-                &mut Inst::Mult(ref mut a, ref mut b, ref mut c) => {
+                &mut Inst::Mult(_, ref mut b, ref mut c) => {
                     if *b == r {
                         *b = R::Const(val);
                     }
@@ -364,8 +368,8 @@ fn const_prop(
                         *c = R::Const(val);
                     }
                 }
-                &mut Inst::AssignFrom(ref mut a, ref mut b) => {}
-                &mut Inst::Load(ref mut a, _) => {}
+                &mut Inst::AssignFrom(..) => {}
+                &mut Inst::Load(..) => {}
                 &mut Inst::Call(..) |
                 &mut Inst::Jmp(..) => {}
             }
@@ -530,13 +534,12 @@ fn thread_jumps(g: &mut Cfg) {
     }
 }
 
-fn allocate_registers(g: &Cfg, lv: &LiveVariables) -> HashMap<R, Pinned> {
-    let colors: HashSet<Pinned> = Pinned::iter().collect();
-    let mut mapping = HashMap::new();
+pub type InterferenceGraph = Graph<R, (), pg::Undirected>;
+
+pub fn interference_graph(g: &Cfg, lv: &LiveVariables) -> InterferenceGraph {
     let mut idx_mapping = HashMap::new();
     let mut ig = Graph::new_undirected();
 
-    // build ig
     for node in g.node_indices() {
         for live_set in lv.internal_liveness(g, node).values() {
             for &r in live_set {
@@ -548,24 +551,50 @@ fn allocate_registers(g: &Cfg, lv: &LiveVariables) -> HashMap<R, Pinned> {
         }
     }
 
+    ig
+}
+
+pub fn allocate_registers(mut ig: InterferenceGraph) -> HashMap<R, Pinned> {
+    let colors: HashSet<Pinned> = Pinned::iter().collect();
+    let mut mapping = HashMap::new();
     let k = colors.len();
     let mut stack = vec![];
 
-    while ig.node_count() > 0 {
+    let num_sym = ig.node_indices().filter(|&n| ig[n].is_sym()).count();
+
+    for _ in 0..num_sym {
         let node = ig.node_indices()
-            .filter(|n| ig.neighbors(*n).count() < k)
+            .filter(|&n| ig[n].is_sym())
+            .filter(|&n| ig.neighbors(n).count() < k)
             .next()
-            .unwrap_or_else(|| ig.node_indices().next().unwrap());
+            .unwrap_or_else(|| {
+                ig.node_indices()
+                    .filter(|&n| ig[n].is_sym())
+                    .next()
+                    .unwrap()
+            });
+        
+        assert!(ig[node].is_sym());
+
         let neighbors: Vec<R> = ig.neighbors(node).map(|n| ig[n]).collect();
         let r = ig.remove_node(node).unwrap();
-        stack.push((r, neighbors));
+
+        if r.is_sym() {
+            stack.push((r, neighbors));
+        }
     }
 
     while let Some((node, neighbors)) = stack.pop() {
+        println!("{}: {:?}", node, neighbors.iter().sorted());
         let neighbor_colors = neighbors
             .into_iter()
-            .filter_map(|r| mapping.get(&r))
-            .cloned()
+            .map(|r| {
+                match r {
+                    R::R(_) => mapping[&r],
+                    R::Pin(p) => p,
+                    R::Const(_) => unreachable!(),
+                }
+            })
             .collect();
         let color = match node {
             R::Pin(p) => p,
@@ -578,20 +607,12 @@ fn allocate_registers(g: &Cfg, lv: &LiveVariables) -> HashMap<R, Pinned> {
         mapping.insert(node, color);
     }
 
-    if cfg!(debug_assertions) {
-        for (&r, &m) in &mapping {
-            if let R::Pin(p) = r {
-                debug_assert_eq!(p, m);
-            }
-        }
-    }
-
     mapping
 }
 
 type InsIdx = (NodeIndex, usize);
 
-struct LiveVariables {
+pub struct LiveVariables {
     out_f: HashMap<NodeIndex, HashSet<R>>,
 }
 
@@ -629,12 +650,14 @@ fn vars_read(ins: &Inst) -> HashSet<R> {
         }
         Inst::Call(_, num_args) => {
             use self::Pinned::*;
-            set.extend(vars_written(ins)); // hack?
             // SysV: RDI, RSI, RDX, RCX
             assert!(num_args <= 4); // only supporting up to 4 args for now
             set.extend([Rdi, Rsi, Rdx, Rcx].iter().cloned().take(num_args).map(
                 R::Pin,
             ));
+
+            // caller save regs
+            set.extend([Rax, Rcx, Rdx, Rsi, Rdi, R8, R9, R10, R11].iter().cloned().map(R::Pin));
         }
         Inst::Jmp(_) => {}
         Inst::Load(..) => {}
@@ -679,7 +702,7 @@ fn vars_written(ins: &Inst) -> HashSet<R> {
 }
 
 impl LiveVariables {
-    fn internal_liveness(&self, g: &Cfg, block: NodeIndex) -> HashMap<usize, HashSet<R>> {
+    pub fn internal_liveness(&self, g: &Cfg, block: NodeIndex) -> HashMap<usize, HashSet<R>> {
         let ins = &g[block].ins;
 
         // outs for each ins i
@@ -700,7 +723,7 @@ impl LiveVariables {
         map
     }
 
-    fn new(g: &Cfg) -> Self {
+    pub fn new(g: &Cfg) -> Self {
         let in_f = g.node_indices().map(|n| (n, HashSet::new())).collect();
         let out_f = g.node_indices().map(|n| (n, HashSet::new())).collect();
 
@@ -712,8 +735,9 @@ impl LiveVariables {
             let mut lkill = HashSet::new();
 
             for ins in &g[n].ins {
-                lgen.extend(vars_read(ins).difference(&lkill));
+                // REVIEW: ordering of these
                 lkill.extend(vars_written(ins));
+                lgen.extend(vars_read(ins).difference(&lkill));
             }
 
             gen.insert(n, lgen);
@@ -731,7 +755,7 @@ impl LiveVariables {
     }
 }
 
-struct Lvstate {
+pub struct Lvstate {
     in_f: HashMap<NodeIndex, HashSet<R>>,
     out_f: HashMap<NodeIndex, HashSet<R>>,
     gen: HashMap<NodeIndex, HashSet<R>>,
@@ -768,13 +792,13 @@ impl dataflow::State for Lvstate {
     }
 }
 
-struct ReachingDefs {
+pub struct ReachingDefs {
     reach_in: HashMap<NodeIndex, HashSet<InsIdx>>,
     defs: HashMap<R, HashSet<InsIdx>>,
 }
 
 impl ReachingDefs {
-    fn internal_analysis(&self, g: &Cfg, bb: NodeIndex) -> HashMap<usize, HashSet<InsIdx>> {
+    pub fn internal_analysis(&self, g: &Cfg, bb: NodeIndex) -> HashMap<usize, HashSet<InsIdx>> {
         let ins = &g[bb].ins;
 
         let mut map = HashMap::new();
@@ -885,7 +909,7 @@ impl dataflow::Analysis for ReachingDefs {
     }
 }
 
-struct Rdstate {
+pub struct Rdstate {
     gen: HashMap<NodeIndex, HashSet<InsIdx>>,
     kill: HashMap<NodeIndex, HashSet<InsIdx>>,
     in_f: HashMap<NodeIndex, HashSet<InsIdx>>,
@@ -938,17 +962,14 @@ fn c_statement(
                     sym
                 );
                 let (node, b) = c_expr(e, g, names);
-                let this = g.add_node(block(Inst::Assign(r, b)));
-                g.add_edge(node, this, "assign");
-                (node, this, false)
+                g[node].ins.push(Inst::Assign(r, b));
+                (node, node, false)
             }
             Statement::Print(ref e) => {
                 let (node, r) = c_expr(e, g, names);
-                let mut block = block(Inst::AssignTo(Pinned::Rdi, r));
-                block.ins.push(Inst::Call("print", 1));
-                let this = g.add_node(block);
-                g.add_edge(node, this, "print");
-                (node, this, false)
+                g[node].ins.push(Inst::AssignTo(Pinned::Rdi, r));
+                g[node].ins.push(Inst::Call("print", 1));
+                (node, node, false)
             }
             Statement::Block(ref stmts) => {
                 let mut prev = None;
@@ -988,15 +1009,14 @@ fn c_statement(
                 for case in cases {
                     match *case {
                         Case::Case(..) => case_blocks.push(g.add_node(empty_block())),
-                        _ => {}
+                        Case::Default(ref s) => {
+                            default = Some(s);
+                        }
                     }
                 }
 
                 for ((i, block), case) in case_blocks.iter().cloned().enumerate().zip(cases) {
                     match *case {
-                        Case::Default(ref s) => {
-                            default = Some(s);
-                        }
                         Case::Case(v, ref s) => {
                             let (guard_node, guard_r) = c_expr(&Expr::I64(v), g, names);
                             let c_end = g.add_node(empty_block());
@@ -1007,7 +1027,7 @@ fn c_statement(
                                 let (begin, end, was_broke) =
                                     c_stmt_inner(s, names, label_exits, g, Some(exit));
 
-                                g.add_edge(block, begin, "");
+                                g.add_edge(block, begin, "case_block");
                                 if !was_broke {
                                     g.add_edge(end, c_end, "case_end");
                                 }
@@ -1026,6 +1046,7 @@ fn c_statement(
 
                             prev = c_end;
                         }
+                        _ => {}
                     }
                 }
 
@@ -1035,7 +1056,8 @@ fn c_statement(
                     prev = end;
                 }
 
-                g.add_edge(prev, exit, "switch_exit");
+                // NOTE: weirdness with add_edge, possible bug somewhere
+                g.update_edge(prev, exit, "switch_exit");
 
                 (node, exit, false)
             }
@@ -1210,7 +1232,6 @@ exit:
 
 struct StringBuilder {
     string: String,
-    indent_level: u32,
 }
 
 impl StringBuilder {
@@ -1220,7 +1241,6 @@ impl StringBuilder {
     fn new() -> Self {
         StringBuilder {
             string: String::new(),
-            indent_level: 0,
         }
     }
 
@@ -1228,9 +1248,7 @@ impl StringBuilder {
     where
         S: AsRef<str>,
     {
-        for _ in 0..self.indent_level * 4 {
-            self.string.push(' ');
-        }
+        self.string.push_str("    ");
         self.string.push_str(s.as_ref());
         self.string.push('\n');
     }
@@ -1249,64 +1267,9 @@ impl StringBuilder {
     {
         self.string += s.as_ref();
     }
-
-    fn indent(&mut self) {
-        self.indent_level += 1;
-    }
-
-    fn unindent(&mut self) {
-        self.indent_level = self.indent_level.checked_sub(1).unwrap();
-    }
 }
 
-
-trait AsGraph<N, E, D> {
-    fn as_graph(&self) -> Graph<N, E, D>;
-}
-
-impl<N: Clone, E: Clone, D: pg::EdgeType> AsGraph<N, E, D>
-    for pg::stable_graph::StableGraph<N, E, D> {
-    fn as_graph(&self) -> Graph<N, E, D> {
-        let mut gg: Graph<N, E, D> = Graph::new().into_edge_type();
-        let mut map = HashMap::new();
-
-        for i in self.node_indices() {
-            let new_node = gg.add_node(self[i].clone());
-            map.insert(i, new_node);
-        }
-
-        for i in self.node_indices() {
-            for n in self.neighbors(i) {
-                let e = self.find_edge(i, n).unwrap();
-                let s = map[&i];
-                let t = map[&n];
-                gg.add_edge(s, t, self[e].clone());
-            }
-        }
-        gg
-    }
-}
-
-impl<N: Clone, E: Clone, D: pg::EdgeType> AsGraph<N, E, D> for Graph<N, E, D> {
-    fn as_graph(&self) -> Graph<N, E, D> {
-        (*self).clone()
-    }
-}
-
-fn print_graph<N, E, D>(g: &AsGraph<N, E, D>)
-where
-    N: Display,
-    E: Display,
-    D: pg::EdgeType,
-{
-    let gg = g.as_graph();
-
-    let dot = pg::dot::Dot::new(&gg);
-    println!("{:#}", dot);
-}
-
-
-fn print_reaching(g: &Cfg, rd: &ReachingDefs) {
+pub fn print_reaching(g: &Cfg, rd: &ReachingDefs) {
     let mut nodes: Vec<_> = rd.reach_in.keys().cloned().collect();
     nodes.sort();
 

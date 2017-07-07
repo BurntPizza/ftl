@@ -1,0 +1,15 @@
+
+// skip
+// out 6 4 2 0
+
+let x = 10;
+
+while (x) {
+  switch (x) {
+    case 0: { print x; break; }
+    case 2: { print x; break; }
+    case 4: { print x; break; }
+    case 6: { print x; break; }
+  }
+  x = x + -1;
+}
