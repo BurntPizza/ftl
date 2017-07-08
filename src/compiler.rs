@@ -188,7 +188,7 @@ pub fn codegen(mut g: Cfg) -> String {
         for ins in g[n].ins.iter_mut() {
             match ins {
                 &mut Inst::Add(ref mut a, ref mut b, ref mut c) => {
-                    assert!(!a.is_const());
+                    debug_assert!(!a.is_const());
                     if a.is_sym() {
                         *a = R::Pin(ra[a]);
                     }
@@ -208,7 +208,7 @@ pub fn codegen(mut g: Cfg) -> String {
                     }
                 }
                 &mut Inst::Assign(ref mut a, ref mut b) => {
-                    assert!(!a.is_const());
+                    debug_assert!(!a.is_const());
                     if a.is_sym() {
                         *a = R::Pin(ra[a]);
                     }
@@ -217,7 +217,7 @@ pub fn codegen(mut g: Cfg) -> String {
                     }
                 }
                 &mut Inst::Mult(ref mut a, ref mut b, ref mut c) => {
-                    assert!(!a.is_const());
+                    debug_assert!(!a.is_const());
                     if a.is_sym() {
                         *a = R::Pin(ra[a]);
                     }
@@ -229,7 +229,7 @@ pub fn codegen(mut g: Cfg) -> String {
                     }
                 }
                 &mut Inst::Load(ref mut a, _) => {
-                    assert!(!a.is_const());
+                    debug_assert!(!a.is_const());
                     if a.is_sym() {
                         *a = R::Pin(ra[a]);
                     }
@@ -435,10 +435,31 @@ fn compile_bb(g: &Cfg, n: NodeIndex, asm: &mut StringBuilder) {
 
     for ins in &bb.ins {
         match *ins {
-            Inst::Add(a, b, c) => asm.line(format!("lea {}, [{} + {}]", a, b, c)),
+            Inst::Add(a, mut b, mut c) => {
+                debug_assert!(a.is_pinned());
+                if b.is_const() {
+                    mem::swap(&mut b, &mut c);
+                }
+                debug_assert!(b.is_pinned());
+                debug_assert!(!c.is_sym());
+                let s;
+
+                if a == b || a == c {
+                    if b == c {
+                        s = format!("add {0}, {0}", a);
+                    } else {
+                        let r = if a == b { c } else { b };
+                        s = format!("add {}, {}", a, r);
+                    }
+                } else {
+                    s = format!("lea {}, [{} + {}]", a, b, c);
+                };
+
+                asm.line(s);
+            }
             Inst::Assign(a, b) => {
-                assert!(a.is_pinned());
-                assert!(!b.is_sym());
+                debug_assert!(a.is_pinned());
+                debug_assert!(!b.is_sym());
 
                 if a != b {
                     asm.line(format!("mov {}, {}", a, b));
@@ -446,8 +467,16 @@ fn compile_bb(g: &Cfg, n: NodeIndex, asm: &mut StringBuilder) {
             }
             Inst::Call(s, _) => asm.line(format!("call {}", s)),
             Inst::Jmp(s) => asm.line(format!("jmp {}", s)),
-            Inst::Load(a, b) => asm.line(format!("mov {}, {}", a, b)),
-            Inst::Mult(a, b, c) => asm.line(format!("lea {}, [{} * {}]", a, b, c)),
+            Inst::Load(a, b) => {
+                debug_assert!(a.is_pinned());
+                asm.line(format!("mov {}, {}", a, b));
+            }
+            Inst::Mult(a, b, c) => {
+                debug_assert!(a.is_pinned());
+                debug_assert!(!b.is_sym());
+                debug_assert!(!c.is_sym());
+                asm.line(format!("lea {}, [{} * {}]", a, b, c));
+            }
             Inst::Test(mut a, mut b) => {
                 if a.is_const() {
                     if b.is_const() {
@@ -455,6 +484,8 @@ fn compile_bb(g: &Cfg, n: NodeIndex, asm: &mut StringBuilder) {
                     }
                     mem::swap(&mut a, &mut b);
                 }
+                debug_assert!(a.is_pinned());
+                debug_assert!(!b.is_sym());
                 asm.line(format!("cmp {}, {}", a, b));
             }
         }
@@ -1237,4 +1268,3 @@ impl StringBuilder {
         self.string += s.as_ref();
     }
 }
-

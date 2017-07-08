@@ -4,10 +4,6 @@ build = "build.rs"
 name = "ftl"
 version = "0.1.0"
 
-[lib]
-name = "ftl"
-path = "src/lib.rs"
-
 [[bin]]
 name = "ftl"
 path = "src/main.rs"
@@ -27,3 +23,7 @@ strum_macros = "0.6.1"
 
 [dependencies.dataflow]
 git = "https://github.com/BurntPizza/dataflow.git"
+
+[lib]
+name = "ftl"
+path = "src/lib.rs"
