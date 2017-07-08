@@ -35,9 +35,10 @@ fn main() {
             .next()
             .unwrap();
 
-        let input: String = input.lines().filter(|l| !l.starts_with("//")).collect();
 
-        let expected_str = expected_str[expected_str.find("OUT").unwrap() + 3..].trim();
+        let expected_str = expected_str[expected_str.to_lowercase().find("out").unwrap() + 3..]
+            .trim();
+        let input: String = input.lines().filter(|l| !l.starts_with("//")).collect();
 
         let prog = ftl::parser::parse_program(&*input).unwrap();
         let asm = ftl::compiler::codegen(ftl::compiler::compile(&prog));
