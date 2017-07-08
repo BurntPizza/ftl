@@ -5,6 +5,7 @@ name = "ftl"
 version = "0.1.0"
 
 [[bin]]
+doc = false
 name = "ftl"
 path = "src/main.rs"
 

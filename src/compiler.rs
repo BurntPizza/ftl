@@ -168,10 +168,7 @@ pub fn compile(ast: &Program) -> Cfg {
 
     contract(&mut g);
     label_blocks(&mut g);
-
-    let (defs, uses) = defs_uses(&g);
-
-    const_prop(&mut g, defs, uses);
+    const_prop(&mut g);
 
     g
 }
@@ -257,6 +254,8 @@ pub fn codegen(mut g: Cfg) -> String {
     let mut stack = vec![start];
     let mut visited = HashSet::new();
 
+    // visit blocks in depth first order.
+
     while let Some(n) = stack.pop() {
         if visited.contains(&n) {
             continue;
@@ -264,34 +263,37 @@ pub fn codegen(mut g: Cfg) -> String {
 
         visited.insert(n);
 
-        compile_bb(&g, n, &mut text);
+        compile_bb(&g[n], &mut text);
 
         if let Some(&Inst::Test(a, b)) = g[n].ins.last() {
-            assert_eq!(g.neighbors(n).count(), 2);
-            let mut neighbors = g.neighbors(n);
-            let mut small_path = neighbors.next().unwrap();
-            let mut large_path = neighbors.next().unwrap();
-            if g[small_path].ins.len() > g[large_path].ins.len() {
-                mem::swap(&mut large_path, &mut small_path);
-            }
-            let cc = g[g.find_edge(n, large_path).unwrap()] == "true";
+            // cmp instruction was already emitted in compile_bb
+            // so now emit jump instruction
 
-            if a.is_const() && b.is_const() {
-                match (a, b) {
-                    (R::Const(a), R::Const(b)) => {
-                        let true_path = if cc { large_path } else { small_path };
-                        let false_path = if cc { small_path } else { large_path };
-                        stack.push(if a == b { true_path } else { false_path });
-                    }
-                    _ => unreachable!(),
+            assert_eq!(g.neighbors(n).count(), 2);
+            let (mut near, mut far) = g.neighbors(n).next_tuple().unwrap();
+
+            // could be smarter about this, e.g. with some look ahead
+            // default heuristic: smaller block will be written next
+            if g[near].ins.len() > g[far].ins.len() {
+                mem::swap(&mut near, &mut far);
+            }
+
+            let cc = g[g.find_edge(n, far).unwrap()] == "true";
+
+            if a == b || a.is_const() && b.is_const() {
+                // only one branch can ever be taken
+                if cc == (a == b) {
+                    stack.push(far);
+                } else {
+                    stack.push(near);
                 }
             } else {
                 let jmp = if cc { "je" } else { "jne" };
-                let target = &g[large_path].label;
+                let target = &g[far].label;
                 text.line(format!("{} {}", jmp, target));
 
-                stack.push(large_path);
-                stack.push(small_path); // small path will be written next
+                stack.push(far);
+                stack.push(near);
             }
         } else {
             assert!(g.neighbors(n).count() <= 1);
@@ -313,33 +315,33 @@ pub fn codegen(mut g: Cfg) -> String {
     p
 }
 
-fn const_prop(
-    g: &mut Cfg,
-    defs: HashMap<R, HashSet<InsIdx>>,
-    uses: HashMap<R, HashSet<InsIdx>>,
-) -> HashMap<R, i64> {
+fn const_prop(g: &mut Cfg) -> HashMap<R, i64> {
+    let (defs, uses) = defs_uses(&g);
     let mut consts = HashMap::new();
     let mut to_remove = HashSet::new();
 
     // TODO: transitive propagation
 
-    for n in g.node_indices() {
-        for i in (0..g[n].ins.len()).rev() {
-            if let Inst::Load(r, val) = g[n].ins[i] {
-                assert!(defs[&r].contains(&(n, i)));
-                if defs[&r].len() == 1 {
-                    consts.insert(r, val);
-                    to_remove.insert((n, i));
-                }
+    for (r, def_set) in defs {
+        // only 1 def site, might be constant
+        if def_set.len() == 1 {
+            let (n, i) = *def_set.iter().next().unwrap();
+            if let Inst::Load(lr, val) = g[n].ins[i] {
+                debug_assert_eq!(r, lr);
+                consts.insert(r, val);
+                to_remove.insert((n, i));
             }
         }
     }
 
-    for (r, uses, &val) in uses.into_iter().filter_map(|(r, uses)| {
-        consts.get(&r).map(|val| (r, uses, val))
-    })
+    // for each use set of a constant
+    for (r, use_set, &val) in
+        uses.into_iter().filter_map(|(r, use_set)| {
+            consts.get(&r).map(|val| (r, use_set, val))
+        })
     {
-        for (n, i) in uses {
+        // mark as constant
+        for (n, i) in use_set {
             match g[n].ins.get_mut(i).unwrap() {
                 &mut Inst::Add(_, ref mut b, ref mut c) => {
                     if *b == r {
@@ -377,6 +379,9 @@ fn const_prop(
         }
     }
 
+    // remove the Load instructions that provided constants
+    // refactor: could do this lazily (e.g. return to_remove and just skip ins at assembly time)
+    // then the RD (and other passes') info wouldn't be invalidated
     let start = g.node_indices().next().unwrap();
     let mut dfs = visit::Dfs::new(&*g, start);
 
@@ -392,6 +397,8 @@ fn const_prop(
     consts
 }
 
+// TODO: rewrite RD analysis to compute exactly the required info below
+
 fn defs_uses(g: &Cfg) -> (HashMap<R, HashSet<InsIdx>>, HashMap<R, HashSet<InsIdx>>) {
     let rd = ReachingDefs::new(&g);
     let mut ins_idx_to_r = HashMap::new();
@@ -400,12 +407,12 @@ fn defs_uses(g: &Cfg) -> (HashMap<R, HashSet<InsIdx>>, HashMap<R, HashSet<InsIdx
 
     for n in g.node_indices() {
         for (i, ins) in g[n].ins.iter().enumerate() {
-            let written: Vec<_> = vars_written(ins)
+            let mut written: Vec<_> = vars_written(ins)
                 .into_iter()
-                .filter(|r| !r.is_pinned())
+                .filter(|r| r.is_sym())
                 .collect();
             assert!(written.len() <= 1);
-            if let Some(r) = written.into_iter().next() {
+            if let Some(r) = written.pop() {
                 uses.entry(r).or_insert(HashSet::new());
                 defs.entry(r).or_insert(HashSet::new()).insert((n, i));
                 ins_idx_to_r.insert((n, i), r);
@@ -416,7 +423,7 @@ fn defs_uses(g: &Cfg) -> (HashMap<R, HashSet<InsIdx>>, HashMap<R, HashSet<InsIdx
     for n in g.node_indices() {
         let ia = rd.internal_analysis(g, n);
         for (i, ins) in g[n].ins.iter().enumerate() {
-            for r in vars_read(ins).into_iter().filter(|r| !r.is_pinned()) {
+            for r in vars_read(ins).into_iter().filter(|r| r.is_sym()) {
                 for def in &ia[&i] {
                     if r == ins_idx_to_r[def] {
                         uses.get_mut(&r).unwrap().insert((n, i));
@@ -429,8 +436,7 @@ fn defs_uses(g: &Cfg) -> (HashMap<R, HashSet<InsIdx>>, HashMap<R, HashSet<InsIdx
     (defs, uses)
 }
 
-fn compile_bb(g: &Cfg, n: NodeIndex, asm: &mut StringBuilder) {
-    let bb = &g[n];
+fn compile_bb(bb: &Block, asm: &mut StringBuilder) {
     asm.label(&bb.label);
 
     for ins in &bb.ins {
@@ -589,7 +595,7 @@ pub fn interference_graph(g: &Cfg, lv: &LiveVariables) -> InterferenceGraph {
 }
 
 pub fn allocate_registers(mut ig: InterferenceGraph) -> HashMap<R, Pinned> {
-    let colors: HashSet<Pinned> = Pinned::iter().collect();
+    let colors: HashSet<_> = Pinned::iter().collect();
     let mut mapping = HashMap::new();
     let k = colors.len();
     let mut stack = vec![];
@@ -598,8 +604,7 @@ pub fn allocate_registers(mut ig: InterferenceGraph) -> HashMap<R, Pinned> {
 
     for _ in 0..num_sym {
         let node = ig.node_indices()
-            .filter(|&n| ig[n].is_sym())
-            .filter(|&n| ig.neighbors(n).count() < k)
+            .filter(|&n| ig[n].is_sym() && ig.neighbors(n).count() < k)
             .next()
             .unwrap_or_else(|| {
                 ig.node_indices()
@@ -650,20 +655,14 @@ pub struct LiveVariables {
 fn vars_read(ins: &Inst) -> HashSet<R> {
     let mut set = HashSet::new();
     match *ins {
-        Inst::Add(_, b, c) => {
+        Inst::Add(_, a, b) |
+        Inst::Mult(_, a, b) |
+        Inst::Test(a, b) => {
+            if !a.is_const() {
+                set.insert(a);
+            }
             if !b.is_const() {
                 set.insert(b);
-            }
-            if !c.is_const() {
-                set.insert(c);
-            }
-        }
-        Inst::Mult(_, b, c) => {
-            if !b.is_const() {
-                set.insert(b);
-            }
-            if !c.is_const() {
-                set.insert(c);
             }
         }
         Inst::Assign(_, b) => {
@@ -689,14 +688,6 @@ fn vars_read(ins: &Inst) -> HashSet<R> {
         }
         Inst::Jmp(_) => {}
         Inst::Load(..) => {}
-        Inst::Test(a, b) => {
-            if !a.is_const() {
-                set.insert(a);
-            }
-            if !b.is_const() {
-                set.insert(b);
-            }
-        }
     }
     set
 }
