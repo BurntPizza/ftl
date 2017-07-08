@@ -136,8 +136,6 @@ pub enum Inst {
     Test(R, R),
     // a = b
     Assign(R, R),
-    AssignFrom(R, Pinned),
-    AssignTo(Pinned, R),
     Load(R, i64),
     // a = b + c
     Add(R, R, R),
@@ -169,7 +167,6 @@ pub fn compile(ast: &Program) -> Cfg {
     }
 
     contract(&mut g);
-    thread_jumps(&mut g);
     label_blocks(&mut g);
 
     let (defs, uses) = defs_uses(&g);
@@ -192,51 +189,50 @@ pub fn codegen(mut g: Cfg) -> String {
             match ins {
                 &mut Inst::Add(ref mut a, ref mut b, ref mut c) => {
                     assert!(!a.is_const());
-                    *a = R::Pin(ra[a]);
-                    if !b.is_const() {
+                    if a.is_sym() {
+                        *a = R::Pin(ra[a]);
+                    }
+                    if b.is_sym() {
                         *b = R::Pin(ra[b]);
                     }
-                    if !c.is_const() {
+                    if c.is_sym() {
                         *c = R::Pin(ra[c]);
                     }
                 }
                 &mut Inst::Test(ref mut a, ref mut b) => {
-                    if !a.is_const() {
+                    if a.is_sym() {
                         *a = R::Pin(ra[a]);
                     }
-                    if !b.is_const() {
+                    if b.is_sym() {
                         *b = R::Pin(ra[b]);
                     }
                 }
                 &mut Inst::Assign(ref mut a, ref mut b) => {
                     assert!(!a.is_const());
-                    *a = R::Pin(ra[a]);
-                    if !b.is_const() {
-                        *b = R::Pin(ra[b]);
+                    if a.is_sym() {
+                        *a = R::Pin(ra[a]);
                     }
-                }
-                &mut Inst::AssignFrom(ref mut a, _) => {
-                    assert!(!a.is_const());
-                    *a = R::Pin(ra[a]);
-                }
-                &mut Inst::AssignTo(_, ref mut b) => {
-                    if !b.is_const() {
+                    if b.is_sym() {
                         *b = R::Pin(ra[b]);
                     }
                 }
                 &mut Inst::Mult(ref mut a, ref mut b, ref mut c) => {
                     assert!(!a.is_const());
-                    *a = R::Pin(ra[a]);
-                    if !b.is_const() {
+                    if a.is_sym() {
+                        *a = R::Pin(ra[a]);
+                    }
+                    if b.is_sym() {
                         *b = R::Pin(ra[b]);
                     }
-                    if !c.is_const() {
+                    if c.is_sym() {
                         *c = R::Pin(ra[c]);
                     }
                 }
                 &mut Inst::Load(ref mut a, _) => {
                     assert!(!a.is_const());
-                    *a = R::Pin(ra[a]);
+                    if a.is_sym() {
+                        *a = R::Pin(ra[a]);
+                    }
                 }
                 &mut Inst::Call(..) |
                 &mut Inst::Jmp(..) => {}
@@ -366,11 +362,6 @@ fn const_prop(
                         *b = R::Const(val);
                     }
                 }
-                &mut Inst::AssignTo(_, ref mut b) => {
-                    if *b == r {
-                        *b = R::Const(val);
-                    }
-                }
                 &mut Inst::Mult(_, ref mut b, ref mut c) => {
                     if *b == r {
                         *b = R::Const(val);
@@ -379,7 +370,6 @@ fn const_prop(
                         *c = R::Const(val);
                     }
                 }
-                &mut Inst::AssignFrom(..) => {}
                 &mut Inst::Load(..) => {}
                 &mut Inst::Call(..) |
                 &mut Inst::Jmp(..) => {}
@@ -436,8 +426,6 @@ fn defs_uses(g: &Cfg) -> (HashMap<R, HashSet<InsIdx>>, HashMap<R, HashSet<InsIdx
         }
     }
 
-    // print_graph(&graph.map(|_, n| format!("{}: {}", n.0.index(), n.1), |_, _| ""));
-
     (defs, uses)
 }
 
@@ -448,9 +436,14 @@ fn compile_bb(g: &Cfg, n: NodeIndex, asm: &mut StringBuilder) {
     for ins in &bb.ins {
         match *ins {
             Inst::Add(a, b, c) => asm.line(format!("lea {}, [{} + {}]", a, b, c)),
-            Inst::Assign(a, b) => asm.line(format!("mov {}, {}", a, b)),
-            Inst::AssignFrom(a, b) => asm.line(format!("mov {}, {}", a, b)),
-            Inst::AssignTo(a, b) => asm.line(format!("mov {}, {}", a, b)),
+            Inst::Assign(a, b) => {
+                assert!(a.is_pinned());
+                assert!(!b.is_sym());
+
+                if a != b {
+                    asm.line(format!("mov {}, {}", a, b));
+                }
+            }
             Inst::Call(s, _) => asm.line(format!("call {}", s)),
             Inst::Jmp(s) => asm.line(format!("jmp {}", s)),
             Inst::Load(a, b) => asm.line(format!("mov {}, {}", a, b)),
@@ -500,21 +493,8 @@ fn contract(g: &mut Cfg) {
             stack.push(n);
         }
     }
-}
 
-fn label_blocks(g: &mut Cfg) {
-    let start = g.node_indices().next().unwrap();
-    let mut dfs = visit::Dfs::new(&*g, start);
-    let mut counter = 0;
-
-    while let Some(i) = dfs.next(&*g) {
-        g[i].idx = i;
-        g[i].label = format!("L{}", counter);
-        counter += 1;
-    }
-}
-
-fn thread_jumps(g: &mut Cfg) {
+    // formerly thread_jumps
     loop {
         let mut to_add = vec![];
         let mut changed = false;
@@ -542,6 +522,18 @@ fn thread_jumps(g: &mut Cfg) {
         for (s, t, w) in to_add {
             g.add_edge(s, t, w);
         }
+    }
+}
+
+fn label_blocks(g: &mut Cfg) {
+    let start = g.node_indices().next().unwrap();
+    let mut dfs = visit::Dfs::new(&*g, start);
+    let mut counter = 0;
+
+    while let Some(i) = dfs.next(&*g) {
+        g[i].idx = i;
+        g[i].label = format!("L{}", counter);
+        counter += 1;
     }
 }
 
@@ -648,14 +640,6 @@ fn vars_read(ins: &Inst) -> HashSet<R> {
                 set.insert(b);
             }
         }
-        Inst::AssignTo(_, b) => {
-            if !b.is_const() {
-                set.insert(b);
-            }
-        }
-        Inst::AssignFrom(_, b) => {
-            set.insert(R::Pin(b));
-        }
         Inst::Call(_, num_args) => {
             use self::Pinned::*;
             // SysV: RDI, RSI, RDX, RCX
@@ -692,13 +676,9 @@ fn vars_written(ins: &Inst) -> HashSet<R> {
     match *ins {
         Inst::Add(r, ..) |
         Inst::Assign(r, _) |
-        Inst::AssignFrom(r, _) |
         Inst::Load(r, _) |
         Inst::Mult(r, ..) => {
             set.insert(r);
-        }
-        Inst::AssignTo(r, _) => {
-            set.insert(R::Pin(r));
         }
         Inst::Call(..) => {
             use self::Pinned::*;
@@ -980,7 +960,7 @@ fn c_statement(
             }
             Statement::Print(ref e) => {
                 let (node, r) = c_expr(e, g, names);
-                g[node].ins.push(Inst::AssignTo(Pinned::Rdi, r));
+                g[node].ins.push(Inst::Assign(R::Pin(Pinned::Rdi), r));
                 g[node].ins.push(Inst::Call("print", 1));
                 (node, node, false)
             }
@@ -1151,18 +1131,14 @@ fn c_expr(e: &Expr, g: &mut Cfg, names: &HashMap<String, R>) -> (NodeIndex, R) {
         Expr::Add(ref a, ref b) => bin_op(Inst::Add, a, b, g, names),
         Expr::Mult(ref a, ref b) => bin_op(Inst::Mult, a, b, g, names),
         Expr::Var(ref s) => {
-            // let r = fresh();
             let b = names[s];
-            let this = g.add_node(
-                /*block(Inst::Assign(r, b))*/
-                empty_block(),
-            );
+            let this = g.add_node(empty_block());
             (this, b)
         }
         Expr::Read => {
             let r = fresh();
             let mut block = block(Inst::Call("read", 0));
-            block.ins.push(Inst::AssignFrom(r, Pinned::Rax));
+            block.ins.push(Inst::Assign(r, R::Pin(Pinned::Rax)));
             let node = g.add_node(block);
             (node, r)
         }
@@ -1222,60 +1198,6 @@ exit:
     xor rdi, rdi
     syscall",
     );
-    //     asm.extend(
-    //         "print:
-    //     push r12
-    //     mov rcx, 10
-    //     mov rax, rdi
-    //     mov rsi, rdi
-    //     shr rdi, 63
-    // __print_loop1:
-    //     inc rdi
-    //     cqo
-    //     idiv rcx
-    //     test rax, rax
-    //     jnz __print_loop1
-    //     inc rdi
-    //     mov rax, rsi
-    //     mov r8, 8
-    //     mov r12, rdi
-    //     and r12, 65520
-    //     cmp r8, r12
-    //     cmova r12, r8
-    //     sub rsp, r12
-    //     dec rdi
-    //     test rax, rax
-    //     jns __print_skip_neg
-    //     mov byte [rsp + 0], 45
-    // __print_skip_neg:
-    //     mov r9, rdi
-    // __print_loop2:
-    //     dec r9
-    //     cqo
-    //     idiv rcx
-    //     mov r8, rdx
-    //     sar r8b, 7
-    //     xor dl, r8b
-    //     sub dl, r8b
-    //     add dl, 48
-    //     mov [rsp + r9], dl
-    //     test rax, rax
-    //     jnz __print_loop2
-    //     mov byte [rsp + rdi], 10
-    //     inc rdi
-    //     mov rdx, rdi
-    //     mov rax, 1
-    //     mov rdi, 1
-    //     mov rsi, rsp
-    //     syscall
-    //     add rsp, r12
-    //     pop r12
-    //     ret
-    // exit:
-    //     mov rax, 60
-    //     xor rdi, rdi
-    //     syscall",
-    //     );
 }
 
 
@@ -1316,19 +1238,3 @@ impl StringBuilder {
     }
 }
 
-pub fn print_reaching(g: &Cfg, rd: &ReachingDefs) {
-    let mut nodes: Vec<_> = rd.reach_in.keys().cloned().collect();
-    nodes.sort();
-
-    for n in nodes {
-        println!("Node {}", n.index());
-        let mut a: Vec<(usize, _)> = rd.internal_analysis(g, n).into_iter().collect();
-        a.sort_by_key(|&(k, _)| k);
-
-        for (i, set) in a {
-            let mut set: Vec<_> = set.into_iter().collect();
-            set.sort_by(|&(n1, i1), &(n2, i2)| n1.cmp(&n2).then(i1.cmp(&i2)));
-            println!("  {}: {:?}", i, set);
-        }
-    }
-}

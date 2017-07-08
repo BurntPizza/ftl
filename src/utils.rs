@@ -1,5 +1,5 @@
 
-use std::fmt::{Display};
+use std::fmt::Display;
 use std::collections::HashMap;
 
 use petgraph::{stable_graph, dot, Graph, EdgeType};
@@ -8,8 +8,7 @@ pub trait AsGraph<N, E, D> {
     fn as_graph(&self) -> Graph<N, E, D>;
 }
 
-impl<N: Clone, E: Clone, D: EdgeType> AsGraph<N, E, D>
-    for stable_graph::StableGraph<N, E, D> {
+impl<N: Clone, E: Clone, D: EdgeType> AsGraph<N, E, D> for stable_graph::StableGraph<N, E, D> {
     fn as_graph(&self) -> Graph<N, E, D> {
         let mut gg: Graph<N, E, D> = Graph::new().into_edge_type();
         let mut map = HashMap::new();
