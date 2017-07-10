@@ -137,7 +137,6 @@ pub enum Inst {
     Test(R, R),
     // a = b
     Assign(R, R),
-    Load(R, i64),
     // a = b + c
     Add(R, R, R),
     Mult(R, R, R),
@@ -250,12 +249,6 @@ pub fn codegen(mut g: Cfg) -> String {
                         *c = R::Pin(ra[c]);
                     }
                 }
-                &mut Inst::Load(ref mut a, _) => {
-                    debug_assert!(!a.is_const());
-                    if a.is_sym() {
-                        *a = R::Pin(ra[a]);
-                    }
-                }
                 &mut Inst::Call(..) |
                 &mut Inst::Jmp(..) => {}
             }
@@ -352,7 +345,7 @@ fn const_prop(g: &mut Cfg) -> HashMap<R, i64> {
         // only 1 def site, might be constant
         if def_set.len() == 1 {
             let (n, i) = *def_set.iter().next().unwrap();
-            if let Inst::Load(lr, val) = g[n].ins[i] {
+            if let Inst::Assign(lr, R::Const(val)) = g[n].ins[i] {
                 debug_assert_eq!(r, lr);
                 consts.insert(r, val);
                 to_remove.insert((n, i));
@@ -398,7 +391,6 @@ fn const_prop(g: &mut Cfg) -> HashMap<R, i64> {
                         *c = R::Const(val);
                     }
                 }
-                &mut Inst::Load(..) => {}
                 &mut Inst::Call(..) |
                 &mut Inst::Jmp(..) => {}
             }
@@ -499,10 +491,6 @@ fn compile_bb(bb: &Block, asm: &mut StringBuilder) {
             }
             Inst::Call(s, _) => asm.line(format!("call {}", s)),
             Inst::Jmp(s) => asm.line(format!("jmp {}", s)),
-            Inst::Load(a, b) => {
-                debug_assert!(a.is_pinned());
-                asm.line(format!("mov {}, {}", a, b));
-            }
             Inst::Mult(a, b, c) => {
                 debug_assert!(a.is_pinned());
                 debug_assert!(!b.is_sym());
@@ -713,7 +701,6 @@ fn vars_read(ins: &Inst) -> HashSet<R> {
             );
         }
         Inst::Jmp(_) => {}
-        Inst::Load(..) => {}
     }
     set
 }
@@ -724,7 +711,6 @@ fn vars_written(ins: &Inst) -> HashSet<R> {
     match *ins {
         Inst::Add(r, ..) |
         Inst::Assign(r, _) |
-        Inst::Load(r, _) |
         Inst::Mult(r, ..) => {
             set.insert(r);
         }
@@ -1173,7 +1159,7 @@ fn c_expr(e: &Expr, g: &mut Cfg, names: &HashMap<String, R>) -> (NodeIndex, R) {
     match *e {
         Expr::I64(v) => {
             let r = fresh();
-            let this = g.add_node(block(Inst::Load(r, v)));
+            let this = g.add_node(block(Inst::Assign(r, R::Const(v))));
             (this, r)
         }
         Expr::Add(ref a, ref b) => bin_op(Inst::Add, a, b, g, names),
