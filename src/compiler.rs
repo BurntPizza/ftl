@@ -202,6 +202,24 @@ pub fn codegen(mut g: Cfg) -> String {
     let ig = interference_graph(&g, &lv);
     let ra = allocate_registers(ig);
 
+    if cfg!(debug_assertions) {
+        let mut missing = vec![];
+        for r in g.node_indices()
+            .flat_map(|n| &g[n].ins)
+            .flat_map(|ins| vars_written(ins).into_iter().chain(vars_read(ins)))
+            .filter(|r| r.is_sym())
+        {
+            if !ra.contains_key(&r) {
+                missing.push(r);
+            }
+        }
+
+        missing.sort();
+        missing.dedup();
+
+        assert_eq!(Vec::<R>::new(), missing);
+    }
+
     // apply register allocation
     let start = g.node_indices().next().unwrap();
     let mut dfs = visit::Dfs::new(&g, start);
@@ -374,7 +392,11 @@ impl dataflow::State for Cpstate {
         &self.kill[&i]
     }
 
-    fn in_facts(&mut self, i: Self::NodeIdx) -> &mut Self::Set {
+    fn in_facts(&self, i: Self::NodeIdx) -> &Self::Set {
+        self.in_f.get(&i).unwrap()
+    }
+
+    fn in_facts_mut(&mut self, i: Self::NodeIdx) -> &mut Self::Set {
         self.in_f.get_mut(&i).unwrap()
     }
 
@@ -518,19 +540,15 @@ pub fn const_prop(g: &mut Cfg) {
         Set: dataflow::Set<(R, i64)>,
         S: dataflow::State<Idx = (R, i64), Set = Set, NodeIdx = NodeIndex>,
     {
-        let v = iter.collect_vec();
-        let union_of_ins = v.iter().cloned().map(|i| state.out_facts(i)).fold(
+        let inputs = iter.collect_vec();
+        let union_of_ins = inputs.iter().cloned().map(|i| state.out_facts(i)).fold(
             Set::empty(),
-            |acc, e| {
-                acc.union(e)
-            },
+            Set::union,
         );
 
-        let union_of_kills = v.iter().cloned().map(|i| state.kill(i)).fold(
+        let union_of_kills = inputs.iter().cloned().map(|i| state.kill(i)).fold(
             Set::empty(),
-            |acc, e| {
-                acc.union(e)
-            },
+            Set::union,
         );
 
         union_of_ins.difference(&union_of_kills)
@@ -950,8 +968,6 @@ impl LiveVariables {
         let mut map = HashMap::new();
         let mut current_out = self.out_f[&block].clone();
         for (i, ins) in ins.iter().enumerate().rev() {
-            map.insert(i, current_out.clone());
-
             // kill
             for r in vars_written(ins) {
                 current_out.remove(&r);
@@ -959,6 +975,9 @@ impl LiveVariables {
 
             // gen
             current_out.extend(vars_read(ins));
+
+            // REVIEW: ordering
+            map.insert(i, current_out.clone());
         }
 
         map
@@ -976,8 +995,8 @@ impl LiveVariables {
 
             for ins in &g[n].ins {
                 // REVIEW: ordering of these
-                lkill.extend(vars_written(ins));
-                lgen.extend(vars_read(ins).difference(&lkill));
+                lkill.extend(vars_written(ins).into_iter().filter(|r| !r.is_const()));
+                lgen.extend(vars_read(ins).difference(&lkill).filter(|r| !r.is_const()));
             }
 
             gen.insert(n, lgen);
@@ -1023,7 +1042,11 @@ impl dataflow::State for Lvstate {
         &self.kill[&i]
     }
 
-    fn in_facts(&mut self, i: Self::NodeIdx) -> &mut Self::Set {
+    fn in_facts(&self, i: Self::NodeIdx) -> &Self::Set {
+        self.in_f.get(&i).unwrap()
+    }
+
+    fn in_facts_mut(&mut self, i: Self::NodeIdx) -> &mut Self::Set {
         self.in_f.get_mut(&i).unwrap()
     }
 
