@@ -8,9 +8,7 @@ use dataflow::{self, Forward, Backward, May, Must};
 use ast::*;
 use self::Edge::Debug;
 
-use std::cmp::Eq;
 use std::mem;
-use std::hash::{Hash, Hasher};
 use std::fmt::{self, Display, Formatter};
 use std::collections::{HashMap, HashSet};
 
@@ -338,7 +336,6 @@ pub fn codegen(mut g: Cfg) -> String {
 
 struct ConstProp {
     in_f: HashMap<NodeIndex, HashMap<R, i64>>,
-    out_f: HashMap<NodeIndex, HashMap<R, i64>>,
 }
 
 struct Cpstate {
@@ -355,13 +352,6 @@ impl dataflow::Analysis for ConstProp {
         ConstProp {
             in_f: state
                 .in_f
-                .into_iter()
-                .map(|(n, set)| {
-                    (n, set.into_iter().map(|(r, v)| (r, v)).collect())
-                })
-                .collect(),
-            out_f: state
-                .out_f
                 .into_iter()
                 .map(|(n, set)| {
                     (n, set.into_iter().map(|(r, v)| (r, v)).collect())
@@ -402,6 +392,7 @@ pub fn const_prop(g: &mut Cfg) {
     let mut kill = HashMap::new();
 
     for n in g.node_indices() {
+        let mut consts = HashMap::new();
         let mut lgen = HashSet::new();
         let mut lkill = HashSet::new();
 
@@ -411,37 +402,61 @@ pub fn const_prop(g: &mut Cfg) {
                     if !a.is_sym() {
                         continue;
                     }
-                    if let R::Const(b) = b {
-                        if let R::Const(c) = c {
+                    if let R::Const(bv) = b {
+                        consts.insert(b, bv);
+                    }
+                    if let R::Const(cv) = c {
+                        consts.insert(c, cv);
+                    }
+                    if let Some(&b) = consts.get(&b) {
+                        if let Some(&c) = consts.get(&c) {
                             lgen.insert((a, b + c));
+                            consts.insert(a, b + c);
                             continue;
                         }
                     }
-                    lgen.remove(&(a, 0));
+                    if let Some(e) = lgen.iter().find(|&&(r, _)| r == a).cloned() {
+                        lgen.remove(&e);
+                    }
                     lkill.insert((a, 0));
                 }
                 Inst::Mult(a, b, c) => {
                     if !a.is_sym() {
                         continue;
                     }
-                    if let R::Const(b) = b {
-                        if let R::Const(c) = c {
+                    if let R::Const(bv) = b {
+                        consts.insert(b, bv);
+                    }
+                    if let R::Const(cv) = c {
+                        consts.insert(c, cv);
+                    }
+                    if let Some(&b) = consts.get(&b) {
+                        if let Some(&c) = consts.get(&c) {
                             lgen.insert((a, b * c));
+                            consts.insert(a, b * c);
                             continue;
                         }
                     }
-                    lgen.remove(&(a, 0));
+                    if let Some(e) = lgen.iter().find(|&&(r, _)| r == a).cloned() {
+                        lgen.remove(&e);
+                    }
                     lkill.insert((a, 0));
                 }
                 Inst::Assign(a, b) => {
                     if !a.is_sym() {
                         continue;
                     }
-                    if let R::Const(b) = b {
+                    if let R::Const(bv) = b {
+                        consts.insert(b, bv);
+                    }
+                    if let Some(&b) = consts.get(&b) {
                         lgen.insert((a, b));
+                        consts.insert(a, b);
                         continue;
                     }
-                    lgen.remove(&(a, 0));
+                    if let Some(e) = lgen.iter().find(|&&(r, _)| r == a).cloned() {
+                        lgen.remove(&e);
+                    }
                     lkill.insert((a, 0));
                 }
                 Inst::Call(..) | Inst::Jmp(..) | Inst::Test(..) => {}
@@ -476,7 +491,6 @@ pub fn const_prop(g: &mut Cfg) {
 
     while let Some(n) = dfs.next(&*g) {
         let mut consts: HashMap<R, i64> = cp.in_f[&n].clone();
-        let out = &cp.out_f[&n];
 
         for (i, ins) in g[n].ins.iter_mut().enumerate() {
             debug_assert!(consts.keys().all(|r| !r.is_pinned()));
