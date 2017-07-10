@@ -6,9 +6,10 @@ use strum::IntoEnumIterator;
 
 use dataflow::{self, Forward, Backward, May};
 use ast::*;
+use self::Edge::Debug;
 
 use std::mem;
-use std::fmt::{self, Display, Debug, Formatter};
+use std::fmt::{self, Display, Formatter};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone)]
@@ -94,7 +95,7 @@ impl Display for R {
     }
 }
 
-impl Debug for R {
+impl fmt::Debug for R {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         Display::fmt(self, f)
     }
@@ -124,7 +125,7 @@ impl Display for Pinned {
     }
 }
 
-impl Debug for Pinned {
+impl fmt::Debug for Pinned {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         Display::fmt(self, f)
     }
@@ -144,7 +145,31 @@ pub enum Inst {
     Jmp(&'static str),
 }
 
-type Edge = &'static str;
+#[derive(PartialEq, Debug, Clone, Copy)]
+pub enum Edge {
+    True,
+    False,
+    Debug(&'static str),
+}
+
+impl Edge {
+    fn is_true_false(&self) -> bool {
+        match *self {
+            Edge::True | Edge::False => true,
+            _ => false,
+        }
+    }
+}
+
+impl Display for Edge {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        match *self {
+            Edge::True => write!(f, "true"),
+            Edge::False => write!(f, "false"),
+            Edge::Debug(s) => write!(f, "{:?}", s),
+        }
+    }
+}
 
 pub fn compile(ast: &Program) -> Cfg {
     let mut g = Cfg::new();
@@ -156,14 +181,14 @@ pub fn compile(ast: &Program) -> Cfg {
     for stmt in &ast.0 {
         let (begin, end) = c_statement(stmt, &mut names, &mut label_exits, &mut g);
         if let Some(p_end) = prev {
-            g.add_edge(p_end, begin, "next_top");
+            g.add_edge(p_end, begin, Debug("next_top"));
         }
         prev = Some(end);
     }
 
     let exit = g.add_node(block(Inst::Jmp("exit")));
     if let Some(prev) = prev {
-        g.add_edge(prev, exit, "top_exit");
+        g.add_edge(prev, exit, Debug("top_exit"));
     }
 
     contract(&mut g);
@@ -270,6 +295,7 @@ pub fn codegen(mut g: Cfg) -> String {
             // so now emit jump instruction
 
             assert_eq!(g.neighbors(n).count(), 2);
+            assert!(g.edges(n).all(|e| e.weight().is_true_false()));
             let (mut near, mut far) = g.neighbors(n).next_tuple().unwrap();
 
             // could be smarter about this, e.g. with some look ahead
@@ -278,7 +304,7 @@ pub fn codegen(mut g: Cfg) -> String {
                 mem::swap(&mut near, &mut far);
             }
 
-            let cc = g[g.find_edge(n, far).unwrap()] == "true";
+            let cc = g[g.find_edge(n, far).unwrap()] == Edge::True;
 
             if a == b || a.is_const() && b.is_const() {
                 // only one branch can ever be taken
@@ -994,7 +1020,7 @@ fn c_statement(
                         c_stmt_inner(stmt, names, label_exits, g, exit);
 
                     if let Some((_, p_end)) = prev {
-                        g.add_edge(p_end, n_begin, "block_next");
+                        g.add_edge(p_end, n_begin, Debug("block_next"));
                     }
 
                     prev = Some((prev.map(|(b, _)| b).unwrap_or(n_begin), n_end));
@@ -1042,9 +1068,9 @@ fn c_statement(
                                 let (begin, end, was_broke) =
                                     c_stmt_inner(s, names, label_exits, g, Some(exit));
 
-                                g.add_edge(block, begin, "case_block");
+                                g.add_edge(block, begin, Debug("case_block"));
                                 if !was_broke {
-                                    g.add_edge(end, c_end, "case_end");
+                                    g.add_edge(end, c_end, Debug("case_end"));
                                 }
                             } else {
                                 let n = if i + 1 < cases.len() {
@@ -1052,12 +1078,12 @@ fn c_statement(
                                 } else {
                                     exit
                                 };
-                                g.add_edge(block, n, "");
+                                g.add_edge(block, n, Debug("case_fallthrough"));
                             }
 
-                            g.add_edge(guard_node, block, "true");
-                            g.add_edge(guard_node, c_end, "false");
-                            g.add_edge(prev, guard_node, "switch_next");
+                            g.add_edge(guard_node, block, Edge::True);
+                            g.add_edge(guard_node, c_end, Edge::False);
+                            g.add_edge(prev, guard_node, Debug("switch_next"));
 
                             prev = c_end;
                         }
@@ -1067,12 +1093,12 @@ fn c_statement(
 
                 if let Some(s) = default {
                     let (begin, end, _) = c_stmt_inner(s, names, label_exits, g, Some(exit));
-                    g.add_edge(prev, begin, "switch_next_default");
+                    g.add_edge(prev, begin, Debug("switch_next_default"));
                     prev = end;
                 }
 
                 // NOTE: weirdness with add_edge, possible bug somewhere
-                g.update_edge(prev, exit, "switch_exit");
+                g.update_edge(prev, exit, Debug("switch_exit"));
 
                 (node, exit, false)
             }
@@ -1084,7 +1110,7 @@ fn c_statement(
                 };
 
                 let this = g.add_node(empty_block());
-                g.add_edge(this, exit, "break");
+                g.add_edge(this, exit, Debug("break"));
                 (this, this, true)
             }
             Statement::While(ref cond, ref body, ref label) => {
@@ -1102,11 +1128,11 @@ fn c_statement(
 
                 let (begin, end, was_broke) = c_stmt_inner(body, names, label_exits, g, Some(exit));
 
-                g.add_edge(node, begin, "false");
-                g.add_edge(node, exit, "true");
+                g.add_edge(node, begin, Edge::False);
+                g.add_edge(node, exit, Edge::True);
 
                 if !was_broke {
-                    g.add_edge(end, node, "loop");
+                    g.add_edge(end, node, Debug("loop"));
                 }
 
                 (node, exit, false)
