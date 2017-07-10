@@ -335,14 +335,14 @@ pub fn codegen(mut g: Cfg) -> String {
 }
 
 struct ConstProp {
-    in_f: HashMap<NodeIndex, HashMap<R, i64>>,
+    in_f: HashMap<NodeIndex, RSet>,
 }
 
 struct Cpstate {
-    in_f: HashMap<NodeIndex, HashSet<(R, i64)>>,
-    out_f: HashMap<NodeIndex, HashSet<(R, i64)>>,
-    gen: HashMap<NodeIndex, HashSet<(R, i64)>>,
-    kill: HashMap<NodeIndex, HashSet<(R, i64)>>,
+    in_f: HashMap<NodeIndex, RSet>,
+    out_f: HashMap<NodeIndex, RSet>,
+    gen: HashMap<NodeIndex, RSet>,
+    kill: HashMap<NodeIndex, RSet>,
 }
 
 impl dataflow::Analysis for ConstProp {
@@ -354,7 +354,7 @@ impl dataflow::Analysis for ConstProp {
                 .in_f
                 .into_iter()
                 .map(|(n, set)| {
-                    (n, set.into_iter().map(|(r, v)| (r, v)).collect())
+                    (n, RSet(set.0.into_iter().map(|(r, v)| (r, v)).collect()))
                 })
                 .collect(),
         }
@@ -364,7 +364,7 @@ impl dataflow::Analysis for ConstProp {
 impl dataflow::State for Cpstate {
     type NodeIdx = NodeIndex;
     type Idx = (R, i64);
-    type Set = HashSet<Self::Idx>;
+    type Set = RSet;
 
     fn gen(&self, i: Self::NodeIdx) -> &Self::Set {
         &self.gen[&i]
@@ -378,8 +378,50 @@ impl dataflow::State for Cpstate {
         self.in_f.get_mut(&i).unwrap()
     }
 
-    fn out_facts(&mut self, i: Self::NodeIdx) -> &mut Self::Set {
+    fn out_facts(&self, i: Self::NodeIdx) -> &Self::Set {
+        self.out_f.get(&i).unwrap()
+    }
+
+    fn out_facts_mut(&mut self, i: Self::NodeIdx) -> &mut Self::Set {
         self.out_f.get_mut(&i).unwrap()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct RSet(HashMap<R, i64>);
+
+impl dataflow::Set<(R, i64)> for RSet {
+    fn empty() -> Self {
+        RSet(HashMap::new())
+    }
+
+    // note: only compare keys
+    fn difference(&self, other: &Self) -> Self {
+        RSet(
+            self.0
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .filter(|&(ref k, _)| !other.0.contains_key(&k))
+                .collect(),
+        )
+    }
+
+    fn union(mut self, other: &Self) -> Self {
+        self.0.extend(
+            other.0.iter().map(|(k, v)| (k.clone(), v.clone())),
+        );
+        self
+    }
+
+    fn intersection(self, other: &Self) -> Self {
+        RSet(
+            self.0
+                .into_iter()
+                .filter(|&(ref k, ref v)| {
+                    other.0.get(k).map(|ov| ov == v).unwrap_or(false)
+                })
+                .collect(),
+        )
     }
 }
 
@@ -387,14 +429,17 @@ pub fn const_prop(g: &mut Cfg) {
     // gen: regs assigned a constant value
     // kill: regs assigned a non-constant value
 
-    let f = |g: &Cfg| g.node_indices().map(|n| (n, HashSet::new())).collect();
-    let mut gen = HashMap::new();
-    let mut kill = HashMap::new();
+    let f = |g: &Cfg| {
+        g.node_indices()
+            .map(|n| (n, RSet(HashMap::new())))
+            .collect::<HashMap<_, _>>()
+    };
+    let mut gen: HashMap<_, RSet> = HashMap::new();
+    let mut kill: HashMap<_, RSet> = HashMap::new();
 
     for n in g.node_indices() {
         let mut consts = HashMap::new();
-        let mut lgen = HashSet::new();
-        let mut lkill = HashSet::new();
+        let mut lkill = HashMap::new();
 
         for ins in &g[n].ins {
             match *ins {
@@ -410,15 +455,12 @@ pub fn const_prop(g: &mut Cfg) {
                     }
                     if let Some(&b) = consts.get(&b) {
                         if let Some(&c) = consts.get(&c) {
-                            lgen.insert((a, b + c));
                             consts.insert(a, b + c);
                             continue;
                         }
                     }
-                    if let Some(e) = lgen.iter().find(|&&(r, _)| r == a).cloned() {
-                        lgen.remove(&e);
-                    }
-                    lkill.insert((a, 0));
+                    consts.remove(&a);
+                    lkill.insert(a, 0);
                 }
                 Inst::Mult(a, b, c) => {
                     if !a.is_sym() {
@@ -432,15 +474,12 @@ pub fn const_prop(g: &mut Cfg) {
                     }
                     if let Some(&b) = consts.get(&b) {
                         if let Some(&c) = consts.get(&c) {
-                            lgen.insert((a, b * c));
                             consts.insert(a, b * c);
                             continue;
                         }
                     }
-                    if let Some(e) = lgen.iter().find(|&&(r, _)| r == a).cloned() {
-                        lgen.remove(&e);
-                    }
-                    lkill.insert((a, 0));
+                    consts.remove(&a);
+                    lkill.insert(a, 0);
                 }
                 Inst::Assign(a, b) => {
                     if !a.is_sym() {
@@ -450,21 +489,21 @@ pub fn const_prop(g: &mut Cfg) {
                         consts.insert(b, bv);
                     }
                     if let Some(&b) = consts.get(&b) {
-                        lgen.insert((a, b));
                         consts.insert(a, b);
                         continue;
                     }
-                    if let Some(e) = lgen.iter().find(|&&(r, _)| r == a).cloned() {
-                        lgen.remove(&e);
-                    }
-                    lkill.insert((a, 0));
+                    consts.remove(&a);
+                    lkill.insert(a, 0);
                 }
                 Inst::Call(..) | Inst::Jmp(..) | Inst::Test(..) => {}
             }
         }
 
-        gen.insert(n, lgen);
-        kill.insert(n, lkill);
+        gen.insert(
+            n,
+            RSet(consts.into_iter().filter(|&(r, _)| r.is_sym()).collect()),
+        );
+        kill.insert(n, RSet(lkill));
     }
 
     let init = Cpstate {
@@ -474,15 +513,30 @@ pub fn const_prop(g: &mut Cfg) {
         out_f: f(g),
     };
 
-    let kfn = |a: &HashSet<(R, i64)>, kill: &HashSet<(R, i64)>| {
-        let kill: HashSet<_> = kill.into_iter().map(|&(r, _)| r).collect();
-        a.into_iter()
-            .cloned()
-            .filter(|&(r, _)| !kill.contains(&r))
-            .collect::<HashSet<_>>()
-    };
+    fn join<S, Set, I: Iterator<Item = NodeIndex>>(state: &S, iter: I) -> Set
+    where
+        Set: dataflow::Set<(R, i64)>,
+        S: dataflow::State<Idx = (R, i64), Set = Set, NodeIdx = NodeIndex>,
+    {
+        let v = iter.collect_vec();
+        let union_of_ins = v.iter().cloned().map(|i| state.out_facts(i)).fold(
+            Set::empty(),
+            |acc, e| {
+                acc.union(e)
+            },
+        );
 
-    let cp: ConstProp = dataflow::analyze_kfn(&*g, init, Forward, Must, kfn);
+        let union_of_kills = v.iter().cloned().map(|i| state.kill(i)).fold(
+            Set::empty(),
+            |acc, e| {
+                acc.union(e)
+            },
+        );
+
+        union_of_ins.difference(&union_of_kills)
+    }
+
+    let cp: ConstProp = dataflow::analyze_custom_join(&*g, init, Forward, Must, join);
 
     let start = g.node_indices().next().unwrap();
     let mut dfs = visit::Dfs::new(&*g, start);
@@ -490,7 +544,7 @@ pub fn const_prop(g: &mut Cfg) {
     let mut written = HashMap::new();
 
     while let Some(n) = dfs.next(&*g) {
-        let mut consts: HashMap<R, i64> = cp.in_f[&n].clone();
+        let mut consts: HashMap<R, i64> = cp.in_f[&n].0.clone();
 
         for (i, ins) in g[n].ins.iter_mut().enumerate() {
             debug_assert!(consts.keys().all(|r| !r.is_pinned()));
@@ -973,7 +1027,11 @@ impl dataflow::State for Lvstate {
         self.in_f.get_mut(&i).unwrap()
     }
 
-    fn out_facts(&mut self, i: Self::NodeIdx) -> &mut Self::Set {
+    fn out_facts(&self, i: Self::NodeIdx) -> &Self::Set {
+        self.out_f.get(&i).unwrap()
+    }
+
+    fn out_facts_mut(&mut self, i: Self::NodeIdx) -> &mut Self::Set {
         self.out_f.get_mut(&i).unwrap()
     }
 }

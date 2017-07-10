@@ -23,7 +23,8 @@ strum = "0.6.0"
 strum_macros = "0.6.1"
 
 [dependencies.dataflow]
-git = "https://github.com/BurntPizza/dataflow.git"
+# git = "https://github.com/BurntPizza/dataflow.git"
+path = "../dataflow"
 
 [lib]
 name = "ftl"
