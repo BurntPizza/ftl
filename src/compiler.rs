@@ -4,11 +4,13 @@ use itertools::*;
 use petgraph::prelude::{NodeIndex, Graph};
 use strum::IntoEnumIterator;
 
-use dataflow::{self, Forward, Backward, May};
+use dataflow::{self, Forward, Backward, May, Must};
 use ast::*;
 use self::Edge::Debug;
 
+use std::cmp::Eq;
 use std::mem;
+use std::hash::{Hash, Hasher};
 use std::fmt::{self, Display, Formatter};
 use std::collections::{HashMap, HashSet};
 
@@ -334,61 +336,223 @@ pub fn codegen(mut g: Cfg) -> String {
     p
 }
 
-fn const_prop(g: &mut Cfg) -> HashMap<R, i64> {
-    let (defs, uses) = defs_uses(&g);
-    let mut consts = HashMap::new();
-    let mut to_remove = HashSet::new();
+struct ConstProp {
+    in_f: HashMap<NodeIndex, HashMap<R, i64>>,
+    out_f: HashMap<NodeIndex, HashMap<R, i64>>,
+}
 
-    // TODO: transitive propagation
+struct Cpstate {
+    in_f: HashMap<NodeIndex, HashSet<(R, i64)>>,
+    out_f: HashMap<NodeIndex, HashSet<(R, i64)>>,
+    gen: HashMap<NodeIndex, HashSet<(R, i64)>>,
+    kill: HashMap<NodeIndex, HashSet<(R, i64)>>,
+}
 
-    for (r, def_set) in defs {
-        // only 1 def site, might be constant
-        if def_set.len() == 1 {
-            let (n, i) = *def_set.iter().next().unwrap();
-            if let Inst::Assign(lr, R::Const(val)) = g[n].ins[i] {
-                debug_assert_eq!(r, lr);
-                consts.insert(r, val);
-                to_remove.insert((n, i));
-            }
+impl dataflow::Analysis for ConstProp {
+    type State = Cpstate;
+
+    fn from(state: Self::State) -> Self {
+        ConstProp {
+            in_f: state
+                .in_f
+                .into_iter()
+                .map(|(n, set)| {
+                    (n, set.into_iter().map(|(r, v)| (r, v)).collect())
+                })
+                .collect(),
+            out_f: state
+                .out_f
+                .into_iter()
+                .map(|(n, set)| {
+                    (n, set.into_iter().map(|(r, v)| (r, v)).collect())
+                })
+                .collect(),
         }
     }
+}
 
-    // for each use set of a constant
-    for (r, use_set, &val) in
-        uses.into_iter().filter_map(|(r, use_set)| {
-            consts.get(&r).map(|val| (r, use_set, val))
-        })
-    {
-        // mark as constant
-        for (n, i) in use_set {
-            match g[n].ins.get_mut(i).unwrap() {
-                &mut Inst::Add(_, ref mut b, ref mut c) => {
-                    if *b == r {
-                        *b = R::Const(val);
+impl dataflow::State for Cpstate {
+    type NodeIdx = NodeIndex;
+    type Idx = (R, i64);
+    type Set = HashSet<Self::Idx>;
+
+    fn gen(&self, i: Self::NodeIdx) -> &Self::Set {
+        &self.gen[&i]
+    }
+
+    fn kill(&self, i: Self::NodeIdx) -> &Self::Set {
+        &self.kill[&i]
+    }
+
+    fn in_facts(&mut self, i: Self::NodeIdx) -> &mut Self::Set {
+        self.in_f.get_mut(&i).unwrap()
+    }
+
+    fn out_facts(&mut self, i: Self::NodeIdx) -> &mut Self::Set {
+        self.out_f.get_mut(&i).unwrap()
+    }
+}
+
+pub fn const_prop(g: &mut Cfg) {
+    // gen: regs assigned a constant value
+    // kill: regs assigned a non-constant value
+
+    let f = |g: &Cfg| g.node_indices().map(|n| (n, HashSet::new())).collect();
+    let mut gen = HashMap::new();
+    let mut kill = HashMap::new();
+
+    for n in g.node_indices() {
+        let mut lgen = HashSet::new();
+        let mut lkill = HashSet::new();
+
+        for ins in &g[n].ins {
+            match *ins {
+                Inst::Add(a, b, c) => {
+                    if !a.is_sym() {
+                        continue;
                     }
-                    if *c == r {
-                        *c = R::Const(val);
+                    if let R::Const(b) = b {
+                        if let R::Const(c) = c {
+                            lgen.insert((a, b + c));
+                            continue;
+                        }
                     }
+                    lgen.remove(&(a, 0));
+                    lkill.insert((a, 0));
+                }
+                Inst::Mult(a, b, c) => {
+                    if !a.is_sym() {
+                        continue;
+                    }
+                    if let R::Const(b) = b {
+                        if let R::Const(c) = c {
+                            lgen.insert((a, b * c));
+                            continue;
+                        }
+                    }
+                    lgen.remove(&(a, 0));
+                    lkill.insert((a, 0));
+                }
+                Inst::Assign(a, b) => {
+                    if !a.is_sym() {
+                        continue;
+                    }
+                    if let R::Const(b) = b {
+                        lgen.insert((a, b));
+                        continue;
+                    }
+                    lgen.remove(&(a, 0));
+                    lkill.insert((a, 0));
+                }
+                Inst::Call(..) | Inst::Jmp(..) | Inst::Test(..) => {}
+            }
+        }
+
+        gen.insert(n, lgen);
+        kill.insert(n, lkill);
+    }
+
+    let init = Cpstate {
+        gen,
+        kill,
+        in_f: f(g),
+        out_f: f(g),
+    };
+
+    let kfn = |a: &HashSet<(R, i64)>, kill: &HashSet<(R, i64)>| {
+        let kill: HashSet<_> = kill.into_iter().map(|&(r, _)| r).collect();
+        a.into_iter()
+            .cloned()
+            .filter(|&(r, _)| !kill.contains(&r))
+            .collect::<HashSet<_>>()
+    };
+
+    let cp: ConstProp = dataflow::analyze_kfn(&*g, init, Forward, Must, kfn);
+
+    let start = g.node_indices().next().unwrap();
+    let mut dfs = visit::Dfs::new(&*g, start);
+    let mut to_remove = HashSet::new();
+    let mut written = HashMap::new();
+
+    while let Some(n) = dfs.next(&*g) {
+        let mut consts: HashMap<R, i64> = cp.in_f[&n].clone();
+        let out = &cp.out_f[&n];
+
+        for (i, ins) in g[n].ins.iter_mut().enumerate() {
+            debug_assert!(consts.keys().all(|r| !r.is_pinned()));
+            match ins {
+                &mut Inst::Add(ref mut a, ref mut b, ref mut c) => {
+                    if let R::Const(bv) = *b {
+                        consts.insert(*b, bv);
+                    } else if let Some(&bv) = consts.get(b) {
+                        *b = R::Const(bv);
+                    }
+                    if let R::Const(cv) = *c {
+                        consts.insert(*c, cv);
+                    } else if let Some(&cv) = consts.get(c) {
+                        *c = R::Const(cv);
+                    }
+                    if let R::Const(b) = *b {
+                        if let R::Const(c) = *c {
+                            if !a.is_pinned() {
+                                consts.insert(*a, b + c);
+                                to_remove.insert((n, i));
+                                written.insert((n, i), *a);
+                            }
+                            continue;
+                        }
+                    }
+                    consts.remove(a);
+                }
+                &mut Inst::Assign(ref mut a, ref mut b) => {
+                    if let R::Const(bv) = *b {
+                        consts.insert(*b, bv);
+                    } else if let Some(&bv) = consts.get(b) {
+                        *b = R::Const(bv);
+                    }
+                    if let R::Const(b) = *b {
+                        if !a.is_pinned() {
+                            consts.insert(*a, b);
+                            to_remove.insert((n, i));
+                            written.insert((n, i), *a);
+                        }
+                        continue;
+                    }
+                    consts.remove(a);
+                }
+                &mut Inst::Mult(ref mut a, ref mut b, ref mut c) => {
+                    if let R::Const(bv) = *b {
+                        consts.insert(*b, bv);
+                    } else if let Some(&bv) = consts.get(b) {
+                        *b = R::Const(bv);
+                    }
+                    if let R::Const(cv) = *c {
+                        consts.insert(*c, cv);
+                    } else if let Some(&cv) = consts.get(c) {
+                        *c = R::Const(cv);
+                    }
+                    if let R::Const(b) = *b {
+                        if let R::Const(c) = *c {
+                            if !a.is_pinned() {
+                                consts.insert(*a, b * c);
+                                to_remove.insert((n, i));
+                                written.insert((n, i), *a);
+                            }
+                            continue;
+                        }
+                    }
+                    consts.remove(a);
                 }
                 &mut Inst::Test(ref mut a, ref mut b) => {
-                    if *a == r {
+                    if let R::Const(av) = *a {
+                        consts.insert(*a, av);
+                    } else if let Some(&val) = consts.get(a) {
                         *a = R::Const(val);
                     }
-                    if *b == r {
+                    if let R::Const(bv) = *b {
+                        consts.insert(*b, bv);
+                    } else if let Some(&val) = consts.get(b) {
                         *b = R::Const(val);
-                    }
-                }
-                &mut Inst::Assign(_, ref mut b) => {
-                    if *b == r {
-                        *b = R::Const(val);
-                    }
-                }
-                &mut Inst::Mult(_, ref mut b, ref mut c) => {
-                    if *b == r {
-                        *b = R::Const(val);
-                    }
-                    if *c == r {
-                        *c = R::Const(val);
                     }
                 }
                 &mut Inst::Call(..) |
@@ -397,9 +561,34 @@ fn const_prop(g: &mut Cfg) -> HashMap<R, i64> {
         }
     }
 
-    // remove the Load instructions that provided constants
-    // refactor: could do this lazily (e.g. return to_remove and just skip ins at assembly time)
-    // then the RD (and other passes') info wouldn't be invalidated
+    let mut uses = HashMap::new();
+
+    for n in g.node_indices() {
+        for (i, ins) in g[n].ins.iter().enumerate() {
+            match *ins {
+                Inst::Call(..) => {}
+                _ => {
+                    for r in vars_read(ins).into_iter().filter(R::is_sym) {
+                        uses.entry(r).or_insert_with(HashSet::new).insert((n, i));
+                    }
+                }
+            }
+        }
+    }
+
+    let to_remove: HashSet<_> = to_remove
+        .iter()
+        .cloned()
+        .filter(|idx| {
+            uses.get(&written[idx])
+                .into_iter()
+                .flat_map(|opt| opt)
+                .all(|idx| to_remove.contains(idx))
+        })
+        .collect();
+
+    // remove the dead instructions that provided constants
+    // refactor: could do this lazily?
     let start = g.node_indices().next().unwrap();
     let mut dfs = visit::Dfs::new(&*g, start);
 
@@ -411,47 +600,6 @@ fn const_prop(g: &mut Cfg) -> HashMap<R, i64> {
             }
         }
     }
-
-    consts
-}
-
-// TODO: rewrite RD analysis to compute exactly the required info below
-
-fn defs_uses(g: &Cfg) -> (HashMap<R, HashSet<InsIdx>>, HashMap<R, HashSet<InsIdx>>) {
-    let rd = ReachingDefs::new(&g);
-    let mut ins_idx_to_r = HashMap::new();
-    let mut uses = HashMap::new();
-    let mut defs = HashMap::new();
-
-    for n in g.node_indices() {
-        for (i, ins) in g[n].ins.iter().enumerate() {
-            let mut written: Vec<_> = vars_written(ins)
-                .into_iter()
-                .filter(|r| r.is_sym())
-                .collect();
-            assert!(written.len() <= 1);
-            if let Some(r) = written.pop() {
-                uses.entry(r).or_insert(HashSet::new());
-                defs.entry(r).or_insert(HashSet::new()).insert((n, i));
-                ins_idx_to_r.insert((n, i), r);
-            }
-        }
-    }
-
-    for n in g.node_indices() {
-        let ia = rd.internal_analysis(g, n);
-        for (i, ins) in g[n].ins.iter().enumerate() {
-            for r in vars_read(ins).into_iter().filter(|r| r.is_sym()) {
-                for def in &ia[&i] {
-                    if r == ins_idx_to_r[def] {
-                        uses.get_mut(&r).unwrap().insert((n, i));
-                    }
-                }
-            }
-        }
-    }
-
-    (defs, uses)
 }
 
 fn compile_bb(bb: &Block, asm: &mut StringBuilder) {
@@ -660,8 +808,6 @@ pub fn allocate_registers(mut ig: InterferenceGraph) -> HashMap<R, Pinned> {
     mapping
 }
 
-type InsIdx = (NodeIndex, usize);
-
 pub struct LiveVariables {
     out_f: HashMap<NodeIndex, HashSet<R>>,
 }
@@ -751,8 +897,7 @@ impl LiveVariables {
     }
 
     pub fn new(g: &Cfg) -> Self {
-        let in_f = g.node_indices().map(|n| (n, HashSet::new())).collect();
-        let out_f = g.node_indices().map(|n| (n, HashSet::new())).collect();
+        let f = || g.node_indices().map(|n| (n, HashSet::new())).collect();
 
         let mut gen = HashMap::new();
         let mut kill = HashMap::new();
@@ -772,8 +917,8 @@ impl LiveVariables {
         }
 
         let init = Lvstate {
-            in_f,
-            out_f,
+            in_f: f(),
+            out_f: f(),
             gen,
             kill,
         };
@@ -800,153 +945,6 @@ impl dataflow::Analysis for LiveVariables {
 impl dataflow::State for Lvstate {
     type NodeIdx = NodeIndex;
     type Idx = R;
-    type Set = HashSet<Self::Idx>;
-
-    fn gen(&self, i: Self::NodeIdx) -> &Self::Set {
-        &self.gen[&i]
-    }
-
-    fn kill(&self, i: Self::NodeIdx) -> &Self::Set {
-        &self.kill[&i]
-    }
-
-    fn in_facts(&mut self, i: Self::NodeIdx) -> &mut Self::Set {
-        self.in_f.get_mut(&i).unwrap()
-    }
-
-    fn out_facts(&mut self, i: Self::NodeIdx) -> &mut Self::Set {
-        self.out_f.get_mut(&i).unwrap()
-    }
-}
-
-pub struct ReachingDefs {
-    reach_in: HashMap<NodeIndex, HashSet<InsIdx>>,
-    defs: HashMap<R, HashSet<InsIdx>>,
-}
-
-impl ReachingDefs {
-    pub fn internal_analysis(&self, g: &Cfg, bb: NodeIndex) -> HashMap<usize, HashSet<InsIdx>> {
-        let ins = &g[bb].ins;
-
-        let mut map = HashMap::new();
-        let mut current_out = self.reach_in[&bb].clone();
-        for (i, ins) in ins.iter().enumerate() {
-            let mut gen = false;
-
-            // kill
-            for r in vars_written(ins).into_iter().filter(|r| !r.is_pinned()) {
-                gen = true;
-                for ins_idx in &self.defs[&r] {
-                    current_out.remove(&ins_idx);
-                }
-            }
-
-            // gen
-            if gen {
-                current_out.insert((bb, i));
-            }
-
-            map.insert(i, current_out.clone());
-        }
-
-        map
-    }
-
-    fn new(g: &Cfg) -> Self {
-        let mut defs = HashMap::new();
-        let mut r_in = HashMap::new();
-        let mut r_out = HashMap::new();
-
-        for n in g.node_indices() {
-            r_in.insert(n, HashSet::new());
-            r_out.insert(n, HashSet::new());
-
-            for (i, ins) in g[n].ins.iter().enumerate() {
-                for r in vars_written(ins) {
-                    defs.entry(r).or_insert(HashSet::new()).insert((n, i));
-                }
-            }
-        }
-
-        let gen: HashMap<NodeIndex, HashSet<InsIdx>> = g.node_indices()
-            .map(|n| {
-                (
-                    n,
-                    g[n]
-                        .ins
-                        .iter()
-                        .enumerate()
-                        .filter(|&(_, ins)| {
-                            vars_written(ins)
-                                .into_iter()
-                                .filter(|r| !r.is_pinned())
-                                .count() != 0
-                        })
-                        .map(|(i, _)| (n, i))
-                        .collect(),
-                )
-            })
-            .collect();
-
-        let kill = g.node_indices()
-            .map(|n| {
-                let gen = &gen[&n];
-                (
-                    n,
-                    g[n]
-                        .ins
-                        .iter()
-                        .filter_map(|ins| {
-                            let vw: HashSet<R> = vars_written(ins)
-                                .into_iter()
-                                .filter(|r| !r.is_pinned())
-                                .collect();
-                            if vw.is_empty() { None } else { Some(vw) }
-                        })
-                        .flat_map(|r_set| {
-                            r_set.into_iter().flat_map(|r| {
-                                defs[&r].iter().cloned().filter(|def| !gen.contains(def))
-                            })
-                        })
-                        .collect(),
-                )
-            })
-            .collect();
-
-        let init = Rdstate {
-            gen,
-            kill,
-            in_f: r_in,
-            out_f: r_out,
-            defs,
-        };
-
-        dataflow::analyze(g, init, Forward, May)
-    }
-}
-
-impl dataflow::Analysis for ReachingDefs {
-    type State = Rdstate;
-
-    fn from(state: Self::State) -> Self {
-        ReachingDefs {
-            reach_in: state.in_f,
-            defs: state.defs,
-        }
-    }
-}
-
-pub struct Rdstate {
-    gen: HashMap<NodeIndex, HashSet<InsIdx>>,
-    kill: HashMap<NodeIndex, HashSet<InsIdx>>,
-    in_f: HashMap<NodeIndex, HashSet<InsIdx>>,
-    out_f: HashMap<NodeIndex, HashSet<InsIdx>>,
-    defs: HashMap<R, HashSet<InsIdx>>,
-}
-
-impl dataflow::State for Rdstate {
-    type NodeIdx = NodeIndex;
-    type Idx = InsIdx;
     type Set = HashSet<Self::Idx>;
 
     fn gen(&self, i: Self::NodeIdx) -> &Self::Set {
