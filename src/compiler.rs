@@ -4,7 +4,7 @@ use itertools::*;
 use petgraph::prelude::{NodeIndex, Graph};
 use strum::IntoEnumIterator;
 
-use dataflow::{self, Forward, Backward, May, Must};
+use dataflow::{self, Forward, Backward, May, Set};
 use ast::*;
 use self::Edge::Debug;
 
@@ -17,16 +17,6 @@ pub struct Block {
     idx: NodeIndex,
     label: String,
     ins: Vec<Inst>,
-}
-
-impl Display for Block {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        let mut s = String::new();
-        for (i, ins) in self.ins.iter().enumerate() {
-            s += &format!("\n{}:  {:?}", i, ins);
-        }
-        write!(f, "[{}] {}{}", self.idx.index(), self.label, s)
-    }
 }
 
 pub type Cfg = stable_graph::StableDiGraph<Block, Edge>;
@@ -85,52 +75,6 @@ pub enum Pinned {
     Rbp,
 }
 
-impl Display for R {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        match *self {
-            R::Pin(p) => write!(f, "{}", p),
-            R::R(n) => write!(f, "R{}", n),
-            R::Const(val) => write!(f, "{}", val),
-        }
-    }
-}
-
-impl fmt::Debug for R {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        Display::fmt(self, f)
-    }
-}
-
-impl Display for Pinned {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        use self::Pinned::*;
-        let s = match *self {
-            Rax => "rax",
-            Rbx => "rbx",
-            Rcx => "rcx",
-            Rdx => "rdx",
-            Rdi => "rdi",
-            Rsi => "rsi",
-            R8 => "r8",
-            R9 => "r9",
-            R10 => "r10",
-            R11 => "r11",
-            R12 => "r12",
-            R13 => "r13",
-            R14 => "r14",
-            R15 => "r15",
-            Rbp => "rbp",
-        };
-        write!(f, "{}", s)
-    }
-}
-
-impl fmt::Debug for Pinned {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        Display::fmt(self, f)
-    }
-}
-
 #[derive(PartialEq, Debug, Clone)]
 pub enum Inst {
     // a == b?
@@ -156,16 +100,6 @@ impl Edge {
         match *self {
             Edge::True | Edge::False => true,
             _ => false,
-        }
-    }
-}
-
-impl Display for Edge {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        match *self {
-            Edge::True => write!(f, "true"),
-            Edge::False => write!(f, "false"),
-            Edge::Debug(s) => write!(f, "{:?}", s),
         }
     }
 }
@@ -346,73 +280,22 @@ pub fn codegen(mut g: Cfg) -> String {
 
     link_builtins(&mut text);
 
-    let mut p = p.into();
-    p += &*data.into();
-    p += &*text.into();
-    p
+    p.extend(data.into());
+    p.extend(text.into());
+    p.into()
 }
 
 struct ConstProp {
-    in_f: HashMap<NodeIndex, RSet>,
-}
-
-struct Cpstate {
     in_f: HashMap<NodeIndex, RSet>,
     out_f: HashMap<NodeIndex, RSet>,
     gen: HashMap<NodeIndex, RSet>,
     kill: HashMap<NodeIndex, RSet>,
 }
 
-impl dataflow::Analysis for ConstProp {
-    type State = Cpstate;
-
-    fn from(state: Self::State) -> Self {
-        ConstProp {
-            in_f: state
-                .in_f
-                .into_iter()
-                .map(|(n, set)| {
-                    (n, RSet(set.0.into_iter().map(|(r, v)| (r, v)).collect()))
-                })
-                .collect(),
-        }
-    }
-}
-
-impl dataflow::State for Cpstate {
-    type NodeIdx = NodeIndex;
-    type Idx = (R, i64);
-    type Set = RSet;
-
-    fn gen(&self, i: Self::NodeIdx) -> &Self::Set {
-        &self.gen[&i]
-    }
-
-    fn kill(&self, i: Self::NodeIdx) -> &Self::Set {
-        &self.kill[&i]
-    }
-
-    fn in_facts(&self, i: Self::NodeIdx) -> &Self::Set {
-        self.in_f.get(&i).unwrap()
-    }
-
-    fn in_facts_mut(&mut self, i: Self::NodeIdx) -> &mut Self::Set {
-        self.in_f.get_mut(&i).unwrap()
-    }
-
-    fn out_facts(&self, i: Self::NodeIdx) -> &Self::Set {
-        self.out_f.get(&i).unwrap()
-    }
-
-    fn out_facts_mut(&mut self, i: Self::NodeIdx) -> &mut Self::Set {
-        self.out_f.get_mut(&i).unwrap()
-    }
-}
-
 #[derive(Debug, Clone, PartialEq)]
 struct RSet(HashMap<R, i64>);
 
-impl dataflow::Set<(R, i64)> for RSet {
+impl Set<(R, i64)> for RSet {
     fn empty() -> Self {
         RSet(HashMap::new())
     }
@@ -422,16 +305,14 @@ impl dataflow::Set<(R, i64)> for RSet {
         RSet(
             self.0
                 .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
+                .map(|(&k, &v)| (k, v))
                 .filter(|&(ref k, _)| !other.0.contains_key(&k))
                 .collect(),
         )
     }
 
     fn union(mut self, other: &Self) -> Self {
-        self.0.extend(
-            other.0.iter().map(|(k, v)| (k.clone(), v.clone())),
-        );
+        self.0.extend(other.0.iter().map(|(&k, &v)| (k, v)));
         self
     }
 
@@ -439,27 +320,21 @@ impl dataflow::Set<(R, i64)> for RSet {
         RSet(
             self.0
                 .into_iter()
-                .filter(|&(ref k, ref v)| {
-                    other.0.get(k).map(|ov| ov == v).unwrap_or(false)
-                })
+                .filter(|&(k, v)| other.0.get(&k).map_or(false, |&ov| ov == v))
                 .collect(),
         )
     }
 }
 
 pub fn const_prop(g: &mut Cfg) {
-    // gen: regs assigned a constant value
-    // kill: regs assigned a non-constant value
-
-    let f = |g: &Cfg| {
-        g.node_indices()
-            .map(|n| (n, RSet(HashMap::new())))
-            .collect::<HashMap<_, _>>()
-    };
-    let mut gen: HashMap<_, RSet> = HashMap::new();
-    let mut kill: HashMap<_, RSet> = HashMap::new();
+    let mut in_f = HashMap::new();
+    let mut out_f = HashMap::new();
+    let mut gen = HashMap::new();
+    let mut kill = HashMap::new();
 
     for n in g.node_indices() {
+        in_f.insert(n, RSet::empty());
+        out_f.insert(n, RSet::empty());
         let mut consts = HashMap::new();
         let mut lkill = HashMap::new();
 
@@ -521,27 +396,26 @@ pub fn const_prop(g: &mut Cfg) {
             }
         }
 
-        gen.insert(
-            n,
-            RSet(consts.into_iter().filter(|&(r, _)| r.is_sym()).collect()),
-        );
+        let lgen = consts.into_iter().filter(|&(r, _)| r.is_sym()).collect();
+        gen.insert(n, RSet(lgen));
         kill.insert(n, RSet(lkill));
     }
 
-    let init = Cpstate {
+    let init = ConstProp {
         gen,
         kill,
-        in_f: f(g),
-        out_f: f(g),
+        in_f,
+        out_f,
     };
 
-    fn join<S, Set, I: Iterator<Item = NodeIndex>>(state: &S, iter: I) -> Set
+    fn join<S, Set, I>(state: &S, iter: I) -> Set
     where
+        I: Iterator<Item = NodeIndex>,
         Set: dataflow::Set<(R, i64)>,
-        S: dataflow::State<Idx = (R, i64), Set = Set, NodeIdx = NodeIndex>,
+        S: dataflow::State<Fact = (R, i64), Set = Set, NodeIdx = NodeIndex>,
     {
         let inputs = iter.collect_vec();
-        let union_of_ins = inputs.iter().cloned().map(|i| state.out_facts(i)).fold(
+        let union_of_inputs = inputs.iter().cloned().map(|i| state.out_facts(i)).fold(
             Set::empty(),
             Set::union,
         );
@@ -551,10 +425,10 @@ pub fn const_prop(g: &mut Cfg) {
             Set::union,
         );
 
-        union_of_ins.difference(&union_of_kills)
+        union_of_inputs.difference(&union_of_kills)
     }
 
-    let cp: ConstProp = dataflow::analyze_custom_join(&*g, init, Forward, Must, join);
+    let cp: ConstProp = dataflow::analyze_custom_join(&*g, init, Forward, join);
 
     let start = g.node_indices().next().unwrap();
     let mut dfs = visit::Dfs::new(&*g, start);
@@ -854,12 +728,8 @@ pub fn allocate_registers(mut ig: InterferenceGraph) -> HashMap<R, Pinned> {
         let node = ig.node_indices()
             .filter(|&n| ig[n].is_sym() && ig.neighbors(n).count() < k)
             .next()
-            .unwrap_or_else(|| {
-                ig.node_indices()
-                    .filter(|&n| ig[n].is_sym())
-                    .next()
-                    .unwrap()
-            });
+            .or_else(|| ig.node_indices().filter(|&n| ig[n].is_sym()).next())
+            .unwrap();
 
         assert!(ig[node].is_sym());
 
@@ -895,7 +765,10 @@ pub fn allocate_registers(mut ig: InterferenceGraph) -> HashMap<R, Pinned> {
 }
 
 pub struct LiveVariables {
+    in_f: HashMap<NodeIndex, HashSet<R>>,
     out_f: HashMap<NodeIndex, HashSet<R>>,
+    gen: HashMap<NodeIndex, HashSet<R>>,
+    kill: HashMap<NodeIndex, HashSet<R>>,
 }
 
 fn vars_read(ins: &Inst) -> HashSet<R> {
@@ -1003,7 +876,7 @@ impl LiveVariables {
             kill.insert(n, lkill);
         }
 
-        let init = Lvstate {
+        let init = LiveVariables {
             in_f: f(),
             out_f: f(),
             gen,
@@ -1011,51 +884,6 @@ impl LiveVariables {
         };
 
         dataflow::analyze(g, init, Backward, May)
-    }
-}
-
-pub struct Lvstate {
-    in_f: HashMap<NodeIndex, HashSet<R>>,
-    out_f: HashMap<NodeIndex, HashSet<R>>,
-    gen: HashMap<NodeIndex, HashSet<R>>,
-    kill: HashMap<NodeIndex, HashSet<R>>,
-}
-
-impl dataflow::Analysis for LiveVariables {
-    type State = Lvstate;
-
-    fn from(state: Self::State) -> Self {
-        LiveVariables { out_f: state.out_f }
-    }
-}
-
-impl dataflow::State for Lvstate {
-    type NodeIdx = NodeIndex;
-    type Idx = R;
-    type Set = HashSet<Self::Idx>;
-
-    fn gen(&self, i: Self::NodeIdx) -> &Self::Set {
-        &self.gen[&i]
-    }
-
-    fn kill(&self, i: Self::NodeIdx) -> &Self::Set {
-        &self.kill[&i]
-    }
-
-    fn in_facts(&self, i: Self::NodeIdx) -> &Self::Set {
-        self.in_f.get(&i).unwrap()
-    }
-
-    fn in_facts_mut(&mut self, i: Self::NodeIdx) -> &mut Self::Set {
-        self.in_f.get_mut(&i).unwrap()
-    }
-
-    fn out_facts(&self, i: Self::NodeIdx) -> &Self::Set {
-        self.out_f.get(&i).unwrap()
-    }
-
-    fn out_facts_mut(&mut self, i: Self::NodeIdx) -> &mut Self::Set {
-        self.out_f.get_mut(&i).unwrap()
     }
 }
 
@@ -1102,7 +930,7 @@ fn c_statement(
                         g.add_edge(p_end, n_begin, Debug("block_next"));
                     }
 
-                    prev = Some((prev.map(|(b, _)| b).unwrap_or(n_begin), n_end));
+                    prev = Some((prev.map_or(n_begin, |(b, _)| b), n_end));
 
                     if was_broke {
                         if let Some((b, pe)) = prev {
@@ -1112,10 +940,13 @@ fn c_statement(
                     }
                 }
 
-                prev.map(|(b, pe)| (b, pe, false)).unwrap_or_else(|| {
-                    let i = g.add_node(empty_block());
-                    (i, i, false)
-                })
+                prev.map_or_else(
+                    || {
+                        let i = g.add_node(empty_block());
+                        (i, i, false)
+                    },
+                    |(b, pe)| (b, pe, false),
+                )
             }
             Statement::Switch(Switch { ref arg, ref cases }) => {
                 let (node, arg_r) = c_expr(arg, g, names);
@@ -1362,5 +1193,133 @@ impl StringBuilder {
         S: AsRef<str>,
     {
         self.string += s.as_ref();
+    }
+}
+
+impl dataflow::State for ConstProp {
+    type NodeIdx = NodeIndex;
+    type Fact = (R, i64);
+    type Set = RSet;
+
+    fn gen(&self, i: Self::NodeIdx) -> &Self::Set {
+        &self.gen[&i]
+    }
+
+    fn kill(&self, i: Self::NodeIdx) -> &Self::Set {
+        &self.kill[&i]
+    }
+
+    fn in_facts(&self, i: Self::NodeIdx) -> &Self::Set {
+        self.in_f.get(&i).unwrap()
+    }
+
+    fn in_facts_mut(&mut self, i: Self::NodeIdx) -> &mut Self::Set {
+        self.in_f.get_mut(&i).unwrap()
+    }
+
+    fn out_facts(&self, i: Self::NodeIdx) -> &Self::Set {
+        self.out_f.get(&i).unwrap()
+    }
+
+    fn out_facts_mut(&mut self, i: Self::NodeIdx) -> &mut Self::Set {
+        self.out_f.get_mut(&i).unwrap()
+    }
+}
+
+impl dataflow::State for LiveVariables {
+    type NodeIdx = NodeIndex;
+    type Fact = R;
+    type Set = HashSet<Self::Fact>;
+
+    fn gen(&self, i: Self::NodeIdx) -> &Self::Set {
+        &self.gen[&i]
+    }
+
+    fn kill(&self, i: Self::NodeIdx) -> &Self::Set {
+        &self.kill[&i]
+    }
+
+    fn in_facts(&self, i: Self::NodeIdx) -> &Self::Set {
+        self.in_f.get(&i).unwrap()
+    }
+
+    fn in_facts_mut(&mut self, i: Self::NodeIdx) -> &mut Self::Set {
+        self.in_f.get_mut(&i).unwrap()
+    }
+
+    fn out_facts(&self, i: Self::NodeIdx) -> &Self::Set {
+        self.out_f.get(&i).unwrap()
+    }
+
+    fn out_facts_mut(&mut self, i: Self::NodeIdx) -> &mut Self::Set {
+        self.out_f.get_mut(&i).unwrap()
+    }
+}
+
+impl Display for R {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        match *self {
+            R::Pin(p) => write!(f, "{}", p),
+            R::R(n) => write!(f, "R{}", n),
+            R::Const(val) => write!(f, "{}", val),
+        }
+    }
+}
+
+impl fmt::Debug for R {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        Display::fmt(self, f)
+    }
+}
+
+impl Display for Pinned {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        use self::Pinned::*;
+        let s = match *self {
+            Rax => "rax",
+            Rbx => "rbx",
+            Rcx => "rcx",
+            Rdx => "rdx",
+            Rdi => "rdi",
+            Rsi => "rsi",
+            R8 => "r8",
+            R9 => "r9",
+            R10 => "r10",
+            R11 => "r11",
+            R12 => "r12",
+            R13 => "r13",
+            R14 => "r14",
+            R15 => "r15",
+            Rbp => "rbp",
+        };
+        write!(f, "{}", s)
+    }
+}
+
+impl fmt::Debug for Pinned {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        Display::fmt(self, f)
+    }
+}
+
+
+impl Display for Block {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        let mut s = String::new();
+        for (i, ins) in self.ins.iter().enumerate() {
+            s += &format!("\n{}:  {:?}", i, ins);
+        }
+        write!(f, "[{}] {}{}", self.idx.index(), self.label, s)
+    }
+}
+
+
+impl Display for Edge {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        match *self {
+            Edge::True => write!(f, "true"),
+            Edge::False => write!(f, "false"),
+            Edge::Debug(s) => write!(f, "{:?}", s),
+        }
     }
 }
