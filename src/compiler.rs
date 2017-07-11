@@ -4,9 +4,9 @@ use itertools::*;
 use petgraph::prelude::{NodeIndex, Graph};
 use strum::IntoEnumIterator;
 
-use dataflow::{self, Forward, Backward, May, Set};
 use ast::*;
 use self::Edge::Debug;
+use analysis;
 
 use std::mem;
 use std::fmt::{self, Display, Formatter};
@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 pub struct Block {
     idx: NodeIndex,
     label: String,
-    ins: Vec<Inst>,
+    pub ins: Vec<Inst>,
 }
 
 pub type Cfg = stable_graph::StableDiGraph<Block, Edge>;
@@ -126,13 +126,13 @@ pub fn compile(ast: &Program) -> Cfg {
 
     contract(&mut g);
     label_blocks(&mut g);
-    const_prop(&mut g);
+    analysis::const_prop(&mut g);
 
     g
 }
 
 pub fn codegen(mut g: Cfg) -> String {
-    let lv = LiveVariables::new(&g);
+    let lv = analysis::live_variables(&g);
     let ig = interference_graph(&g, &lv);
     let ra = allocate_registers(ig);
 
@@ -285,283 +285,6 @@ pub fn codegen(mut g: Cfg) -> String {
     p.into()
 }
 
-struct ConstProp {
-    in_f: HashMap<NodeIndex, RSet>,
-    out_f: HashMap<NodeIndex, RSet>,
-    gen: HashMap<NodeIndex, RSet>,
-    kill: HashMap<NodeIndex, RSet>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct RSet(HashMap<R, i64>);
-
-impl Set<(R, i64)> for RSet {
-    fn empty() -> Self {
-        RSet(HashMap::new())
-    }
-
-    // note: only compare keys
-    fn difference(&self, other: &Self) -> Self {
-        RSet(
-            self.0
-                .iter()
-                .map(|(&k, &v)| (k, v))
-                .filter(|&(ref k, _)| !other.0.contains_key(&k))
-                .collect(),
-        )
-    }
-
-    fn union(mut self, other: &Self) -> Self {
-        self.0.extend(other.0.iter().map(|(&k, &v)| (k, v)));
-        self
-    }
-
-    fn intersection(self, other: &Self) -> Self {
-        RSet(
-            self.0
-                .into_iter()
-                .filter(|&(k, v)| other.0.get(&k).map_or(false, |&ov| ov == v))
-                .collect(),
-        )
-    }
-}
-
-pub fn const_prop(g: &mut Cfg) {
-    let mut in_f = HashMap::new();
-    let mut out_f = HashMap::new();
-    let mut gen = HashMap::new();
-    let mut kill = HashMap::new();
-
-    for n in g.node_indices() {
-        in_f.insert(n, RSet::empty());
-        out_f.insert(n, RSet::empty());
-        let mut consts = HashMap::new();
-        let mut lkill = HashMap::new();
-
-        for ins in &g[n].ins {
-            match *ins {
-                Inst::Add(a, b, c) => {
-                    if !a.is_sym() {
-                        continue;
-                    }
-                    if let R::Const(bv) = b {
-                        consts.insert(b, bv);
-                    }
-                    if let R::Const(cv) = c {
-                        consts.insert(c, cv);
-                    }
-                    if let Some(&b) = consts.get(&b) {
-                        if let Some(&c) = consts.get(&c) {
-                            consts.insert(a, b + c);
-                            continue;
-                        }
-                    }
-                    consts.remove(&a);
-                    lkill.insert(a, 0);
-                }
-                Inst::Mult(a, b, c) => {
-                    if !a.is_sym() {
-                        continue;
-                    }
-                    if let R::Const(bv) = b {
-                        consts.insert(b, bv);
-                    }
-                    if let R::Const(cv) = c {
-                        consts.insert(c, cv);
-                    }
-                    if let Some(&b) = consts.get(&b) {
-                        if let Some(&c) = consts.get(&c) {
-                            consts.insert(a, b * c);
-                            continue;
-                        }
-                    }
-                    consts.remove(&a);
-                    lkill.insert(a, 0);
-                }
-                Inst::Assign(a, b) => {
-                    if !a.is_sym() {
-                        continue;
-                    }
-                    if let R::Const(bv) = b {
-                        consts.insert(b, bv);
-                    }
-                    if let Some(&b) = consts.get(&b) {
-                        consts.insert(a, b);
-                        continue;
-                    }
-                    consts.remove(&a);
-                    lkill.insert(a, 0);
-                }
-                Inst::Call(..) | Inst::Jmp(..) | Inst::Test(..) => {}
-            }
-        }
-
-        let lgen = consts.into_iter().filter(|&(r, _)| r.is_sym()).collect();
-        gen.insert(n, RSet(lgen));
-        kill.insert(n, RSet(lkill));
-    }
-
-    let init = ConstProp {
-        gen,
-        kill,
-        in_f,
-        out_f,
-    };
-
-    fn join<S, Set, I>(state: &S, iter: I) -> Set
-    where
-        I: Iterator<Item = NodeIndex>,
-        Set: dataflow::Set<(R, i64)>,
-        S: dataflow::State<Fact = (R, i64), Set = Set, NodeIdx = NodeIndex>,
-    {
-        let inputs = iter.collect_vec();
-        let union_of_inputs = inputs.iter().cloned().map(|i| state.out_facts(i)).fold(
-            Set::empty(),
-            Set::union,
-        );
-
-        let union_of_kills = inputs.iter().cloned().map(|i| state.kill(i)).fold(
-            Set::empty(),
-            Set::union,
-        );
-
-        union_of_inputs.difference(&union_of_kills)
-    }
-
-    let cp: ConstProp = dataflow::analyze_custom_join(&*g, init, Forward, join);
-
-    let start = g.node_indices().next().unwrap();
-    let mut dfs = visit::Dfs::new(&*g, start);
-    let mut to_remove = HashSet::new();
-    let mut written = HashMap::new();
-
-    while let Some(n) = dfs.next(&*g) {
-        let mut consts: HashMap<R, i64> = cp.in_f[&n].0.clone();
-
-        for (i, ins) in g[n].ins.iter_mut().enumerate() {
-            debug_assert!(consts.keys().all(|r| !r.is_pinned()));
-            match ins {
-                &mut Inst::Add(ref mut a, ref mut b, ref mut c) => {
-                    if let R::Const(bv) = *b {
-                        consts.insert(*b, bv);
-                    } else if let Some(&bv) = consts.get(b) {
-                        *b = R::Const(bv);
-                    }
-                    if let R::Const(cv) = *c {
-                        consts.insert(*c, cv);
-                    } else if let Some(&cv) = consts.get(c) {
-                        *c = R::Const(cv);
-                    }
-                    if let R::Const(b) = *b {
-                        if let R::Const(c) = *c {
-                            if !a.is_pinned() {
-                                consts.insert(*a, b + c);
-                                to_remove.insert((n, i));
-                                written.insert((n, i), *a);
-                            }
-                            continue;
-                        }
-                    }
-                    consts.remove(a);
-                }
-                &mut Inst::Assign(ref mut a, ref mut b) => {
-                    if let R::Const(bv) = *b {
-                        consts.insert(*b, bv);
-                    } else if let Some(&bv) = consts.get(b) {
-                        *b = R::Const(bv);
-                    }
-                    if let R::Const(b) = *b {
-                        if !a.is_pinned() {
-                            consts.insert(*a, b);
-                            to_remove.insert((n, i));
-                            written.insert((n, i), *a);
-                        }
-                        continue;
-                    }
-                    consts.remove(a);
-                }
-                &mut Inst::Mult(ref mut a, ref mut b, ref mut c) => {
-                    if let R::Const(bv) = *b {
-                        consts.insert(*b, bv);
-                    } else if let Some(&bv) = consts.get(b) {
-                        *b = R::Const(bv);
-                    }
-                    if let R::Const(cv) = *c {
-                        consts.insert(*c, cv);
-                    } else if let Some(&cv) = consts.get(c) {
-                        *c = R::Const(cv);
-                    }
-                    if let R::Const(b) = *b {
-                        if let R::Const(c) = *c {
-                            if !a.is_pinned() {
-                                consts.insert(*a, b * c);
-                                to_remove.insert((n, i));
-                                written.insert((n, i), *a);
-                            }
-                            continue;
-                        }
-                    }
-                    consts.remove(a);
-                }
-                &mut Inst::Test(ref mut a, ref mut b) => {
-                    if let R::Const(av) = *a {
-                        consts.insert(*a, av);
-                    } else if let Some(&val) = consts.get(a) {
-                        *a = R::Const(val);
-                    }
-                    if let R::Const(bv) = *b {
-                        consts.insert(*b, bv);
-                    } else if let Some(&val) = consts.get(b) {
-                        *b = R::Const(val);
-                    }
-                }
-                &mut Inst::Call(..) |
-                &mut Inst::Jmp(..) => {}
-            }
-        }
-    }
-
-    let mut uses = HashMap::new();
-
-    for n in g.node_indices() {
-        for (i, ins) in g[n].ins.iter().enumerate() {
-            match *ins {
-                Inst::Call(..) => {}
-                _ => {
-                    for r in vars_read(ins).into_iter().filter(R::is_sym) {
-                        uses.entry(r).or_insert_with(HashSet::new).insert((n, i));
-                    }
-                }
-            }
-        }
-    }
-
-    let to_remove: HashSet<_> = to_remove
-        .iter()
-        .cloned()
-        .filter(|idx| {
-            uses.get(&written[idx])
-                .into_iter()
-                .flat_map(|opt| opt)
-                .all(|idx| to_remove.contains(idx))
-        })
-        .collect();
-
-    // remove the dead instructions that provided constants
-    // refactor: could do this lazily?
-    let start = g.node_indices().next().unwrap();
-    let mut dfs = visit::Dfs::new(&*g, start);
-
-    while let Some(n) = dfs.next(&*g) {
-        let block = &mut g[n].ins;
-        for i in (0..block.len()).rev() {
-            if to_remove.contains(&(n, i)) {
-                block.remove(i);
-            }
-        }
-    }
-}
-
 fn compile_bb(bb: &Block, asm: &mut StringBuilder) {
     asm.label(&bb.label);
 
@@ -698,7 +421,7 @@ fn label_blocks(g: &mut Cfg) {
 
 pub type InterferenceGraph = Graph<R, (), Undirected>;
 
-pub fn interference_graph(g: &Cfg, lv: &LiveVariables) -> InterferenceGraph {
+pub fn interference_graph(g: &Cfg, lv: &analysis::LiveVariables) -> InterferenceGraph {
     let mut idx_mapping = HashMap::new();
     let mut ig = Graph::new_undirected();
 
@@ -764,14 +487,7 @@ pub fn allocate_registers(mut ig: InterferenceGraph) -> HashMap<R, Pinned> {
     mapping
 }
 
-pub struct LiveVariables {
-    in_f: HashMap<NodeIndex, HashSet<R>>,
-    out_f: HashMap<NodeIndex, HashSet<R>>,
-    gen: HashMap<NodeIndex, HashSet<R>>,
-    kill: HashMap<NodeIndex, HashSet<R>>,
-}
-
-fn vars_read(ins: &Inst) -> HashSet<R> {
+pub fn vars_read(ins: &Inst) -> HashSet<R> {
     let mut set = HashSet::new();
     match *ins {
         Inst::Add(_, a, b) |
@@ -810,7 +526,7 @@ fn vars_read(ins: &Inst) -> HashSet<R> {
     set
 }
 
-fn vars_written(ins: &Inst) -> HashSet<R> {
+pub fn vars_written(ins: &Inst) -> HashSet<R> {
     let mut set = HashSet::new();
 
     match *ins {
@@ -831,60 +547,6 @@ fn vars_written(ins: &Inst) -> HashSet<R> {
         Inst::Jmp(..) | Inst::Test(..) => {}
     }
     set
-}
-
-impl LiveVariables {
-    pub fn internal_liveness(&self, g: &Cfg, block: NodeIndex) -> HashMap<usize, HashSet<R>> {
-        let ins = &g[block].ins;
-
-        // outs for each ins i
-        let mut map = HashMap::new();
-        let mut current_out = self.out_f[&block].clone();
-        for (i, ins) in ins.iter().enumerate().rev() {
-            // kill
-            for r in vars_written(ins) {
-                current_out.remove(&r);
-            }
-
-            // gen
-            current_out.extend(vars_read(ins));
-
-            // REVIEW: ordering
-            map.insert(i, current_out.clone());
-        }
-
-        map
-    }
-
-    pub fn new(g: &Cfg) -> Self {
-        let f = || g.node_indices().map(|n| (n, HashSet::new())).collect();
-
-        let mut gen = HashMap::new();
-        let mut kill = HashMap::new();
-
-        for n in g.node_indices() {
-            let mut lgen = HashSet::new();
-            let mut lkill = HashSet::new();
-
-            for ins in &g[n].ins {
-                // REVIEW: ordering of these
-                lkill.extend(vars_written(ins).into_iter().filter(|r| !r.is_const()));
-                lgen.extend(vars_read(ins).difference(&lkill).filter(|r| !r.is_const()));
-            }
-
-            gen.insert(n, lgen);
-            kill.insert(n, lkill);
-        }
-
-        let init = LiveVariables {
-            in_f: f(),
-            out_f: f(),
-            gen,
-            kill,
-        };
-
-        dataflow::analyze(g, init, Backward, May)
-    }
 }
 
 fn c_statement(
@@ -1118,7 +780,6 @@ fn empty_block() -> Block {
     }
 }
 
-
 fn link_builtins(asm: &mut StringBuilder) {
     asm.extend(
         "print:
@@ -1158,7 +819,6 @@ exit:
     );
 }
 
-
 struct StringBuilder {
     string: String,
 }
@@ -1193,66 +853,6 @@ impl StringBuilder {
         S: AsRef<str>,
     {
         self.string += s.as_ref();
-    }
-}
-
-impl dataflow::State for ConstProp {
-    type NodeIdx = NodeIndex;
-    type Fact = (R, i64);
-    type Set = RSet;
-
-    fn gen(&self, i: Self::NodeIdx) -> &Self::Set {
-        &self.gen[&i]
-    }
-
-    fn kill(&self, i: Self::NodeIdx) -> &Self::Set {
-        &self.kill[&i]
-    }
-
-    fn in_facts(&self, i: Self::NodeIdx) -> &Self::Set {
-        self.in_f.get(&i).unwrap()
-    }
-
-    fn in_facts_mut(&mut self, i: Self::NodeIdx) -> &mut Self::Set {
-        self.in_f.get_mut(&i).unwrap()
-    }
-
-    fn out_facts(&self, i: Self::NodeIdx) -> &Self::Set {
-        self.out_f.get(&i).unwrap()
-    }
-
-    fn out_facts_mut(&mut self, i: Self::NodeIdx) -> &mut Self::Set {
-        self.out_f.get_mut(&i).unwrap()
-    }
-}
-
-impl dataflow::State for LiveVariables {
-    type NodeIdx = NodeIndex;
-    type Fact = R;
-    type Set = HashSet<Self::Fact>;
-
-    fn gen(&self, i: Self::NodeIdx) -> &Self::Set {
-        &self.gen[&i]
-    }
-
-    fn kill(&self, i: Self::NodeIdx) -> &Self::Set {
-        &self.kill[&i]
-    }
-
-    fn in_facts(&self, i: Self::NodeIdx) -> &Self::Set {
-        self.in_f.get(&i).unwrap()
-    }
-
-    fn in_facts_mut(&mut self, i: Self::NodeIdx) -> &mut Self::Set {
-        self.in_f.get_mut(&i).unwrap()
-    }
-
-    fn out_facts(&self, i: Self::NodeIdx) -> &Self::Set {
-        self.out_f.get(&i).unwrap()
-    }
-
-    fn out_facts_mut(&mut self, i: Self::NodeIdx) -> &mut Self::Set {
-        self.out_f.get_mut(&i).unwrap()
     }
 }
 
