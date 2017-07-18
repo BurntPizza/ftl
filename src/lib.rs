@@ -1,6 +1,6 @@
 
 extern crate dataflow;
-
+extern crate mrst;
 
 #[macro_use]
 extern crate strum_macros;

@@ -1,5 +1,5 @@
 
-use std::collections::{HashMap,HashSet};
+use std::collections::{HashMap, HashSet};
 
 use itertools::*;
 use petgraph::visit;
@@ -23,6 +23,8 @@ pub fn const_prop(g: &mut Cfg) {
 
         for ins in &g[n].ins {
             match *ins {
+                Inst::And(a, b, c) |
+                Inst::Mult(a, b, c) |
                 Inst::Add(a, b, c) => {
                     if !a.is_sym() {
                         continue;
@@ -35,26 +37,7 @@ pub fn const_prop(g: &mut Cfg) {
                     }
                     if let Some(&b) = consts.get(&b) {
                         if let Some(&c) = consts.get(&c) {
-                            consts.insert(a, b + c);
-                            continue;
-                        }
-                    }
-                    consts.remove(&a);
-                    lkill.insert(a, 0);
-                }
-                Inst::Mult(a, b, c) => {
-                    if !a.is_sym() {
-                        continue;
-                    }
-                    if let R::Const(bv) = b {
-                        consts.insert(b, bv);
-                    }
-                    if let R::Const(cv) = c {
-                        consts.insert(c, cv);
-                    }
-                    if let Some(&b) = consts.get(&b) {
-                        if let Some(&c) = consts.get(&c) {
-                            consts.insert(a, b * c);
+                            consts.insert(a, const_op(ins, &[b, c]));
                             continue;
                         }
                     }
@@ -69,10 +52,19 @@ pub fn const_prop(g: &mut Cfg) {
                         consts.insert(b, bv);
                     }
                     if let Some(&b) = consts.get(&b) {
-                        consts.insert(a, b);
+                        consts.insert(a, const_op(ins, &[b]));
                         continue;
                     }
                     consts.remove(&a);
+                    lkill.insert(a, 0);
+                }
+                Inst::Cjmp(a, ..) => {
+                    //
+                }
+                Inst::Shr(a, b) => {
+                    if let R::Const(bv) = b {
+                        consts.insert(b, bv);
+                    }
                     lkill.insert(a, 0);
                 }
                 Inst::Call(..) | Inst::Jmp(..) | Inst::Test(..) => {}
@@ -118,12 +110,28 @@ pub fn const_prop(g: &mut Cfg) {
     let mut to_remove = HashSet::new();
     let mut written = HashMap::new();
 
+    fn const_op(ins: &Inst, input: &[i64]) -> i64 {
+        match *ins {
+            Inst::Add(..) => input.into_iter().cloned().sum(),
+            Inst::And(..) => input.into_iter().cloned().fold(-1, |a, b| a & b),
+            Inst::Assign(..) => input.into_iter().cloned().next().unwrap(),
+            Inst::Mult(..) => input.into_iter().cloned().product(),
+            Inst::Shr(..) | Inst::Test(..) | Inst::Jmp(..) | Inst::Cjmp(..) | Inst::Call(..) => {
+                unreachable!()
+            }
+        }
+    }
+
     while let Some(n) = dfs.next(&*g) {
         let mut consts: HashMap<R, i64> = cp.in_f[&n].0.clone();
 
         for (i, ins) in g[n].ins.iter_mut().enumerate() {
             debug_assert!(consts.keys().all(|r| !r.is_pinned()));
+            let i_clone = ins.clone();
             match ins {
+                // assigning 3
+                &mut Inst::And(ref mut a, ref mut b, ref mut c) |
+                &mut Inst::Mult(ref mut a, ref mut b, ref mut c) |
                 &mut Inst::Add(ref mut a, ref mut b, ref mut c) => {
                     if let R::Const(bv) = *b {
                         consts.insert(*b, bv);
@@ -138,7 +146,7 @@ pub fn const_prop(g: &mut Cfg) {
                     if let R::Const(b) = *b {
                         if let R::Const(c) = *c {
                             if !a.is_pinned() {
-                                consts.insert(*a, b + c);
+                                consts.insert(*a, const_op(&i_clone, &[b, c]));
                                 to_remove.insert((n, i));
                                 written.insert((n, i), *a);
                             }
@@ -147,6 +155,7 @@ pub fn const_prop(g: &mut Cfg) {
                     }
                     consts.remove(a);
                 }
+                // assigning 2
                 &mut Inst::Assign(ref mut a, ref mut b) => {
                     if let R::Const(bv) = *b {
                         consts.insert(*b, bv);
@@ -155,7 +164,7 @@ pub fn const_prop(g: &mut Cfg) {
                     }
                     if let R::Const(b) = *b {
                         if !a.is_pinned() {
-                            consts.insert(*a, b);
+                            consts.insert(*a, const_op(&i_clone, &[b]));
                             to_remove.insert((n, i));
                             written.insert((n, i), *a);
                         }
@@ -163,29 +172,7 @@ pub fn const_prop(g: &mut Cfg) {
                     }
                     consts.remove(a);
                 }
-                &mut Inst::Mult(ref mut a, ref mut b, ref mut c) => {
-                    if let R::Const(bv) = *b {
-                        consts.insert(*b, bv);
-                    } else if let Some(&bv) = consts.get(b) {
-                        *b = R::Const(bv);
-                    }
-                    if let R::Const(cv) = *c {
-                        consts.insert(*c, cv);
-                    } else if let Some(&cv) = consts.get(c) {
-                        *c = R::Const(cv);
-                    }
-                    if let R::Const(b) = *b {
-                        if let R::Const(c) = *c {
-                            if !a.is_pinned() {
-                                consts.insert(*a, b * c);
-                                to_remove.insert((n, i));
-                                written.insert((n, i), *a);
-                            }
-                            continue;
-                        }
-                    }
-                    consts.remove(a);
-                }
+                // reading 2
                 &mut Inst::Test(ref mut a, ref mut b) => {
                     if let R::Const(av) = *a {
                         consts.insert(*a, av);
@@ -198,8 +185,19 @@ pub fn const_prop(g: &mut Cfg) {
                         *b = R::Const(val);
                     }
                 }
+                &mut Inst::Cjmp(ref mut a, ..) => {
+                    //
+                }
                 &mut Inst::Call(..) |
                 &mut Inst::Jmp(..) => {}
+                &mut Inst::Shr(_, ref mut b) => {
+                // &mut Inst::Cjmp(_, ref mut b, _) => {
+                    if let R::Const(bv) = *b {
+                        consts.insert(*b, bv);
+                    } else if let Some(&bv) = consts.get(b) {
+                        *b = R::Const(bv);
+                    }
+                }
             }
         }
     }

@@ -26,6 +26,9 @@ strum_macros = "0.6.1"
 # git = "https://github.com/BurntPizza/dataflow.git"
 path = "../dataflow"
 
+[dependencies.mrst]
+path = "../mrst"
+
 [lib]
 name = "ftl"
 path = "src/lib.rs"

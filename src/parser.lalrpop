@@ -23,7 +23,7 @@ switch: Switch = "switch " <arg: expr> "{" <cases: case+> "}"
 
 case: Case = { 
     "case " <n: num> ":" <s: statement?> => Case::Case(n, s),
-    "default" ":" <s: statement> => Case::Default(s),
+    "default" ":" <s: statement?> => Case::Default(s),
 };
 
 expr: Expr = {

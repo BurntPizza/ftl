@@ -5,7 +5,7 @@ extern crate structopt;
 #[macro_use]
 extern crate structopt_derive;
 
-use ftl::parser;
+use ftl::{parser, analysis};
 use ftl::compiler::{self, Cfg};
 
 use structopt::*;
@@ -61,7 +61,7 @@ const DEBUG_TABLE: &[(&str, fn(&Cfg) -> !)] = &[
 
 
 fn debug_ig(cfg: &Cfg) -> ! {
-    let lv = compiler::LiveVariables::new(cfg);
+    let lv = analysis::live_variables(cfg);
     let ig = compiler::interference_graph(cfg, &lv);
     ftl::utils::print_graph(&ig.map(|_, n| n, |_, _| ""));
     std::process::exit(0);
@@ -73,7 +73,7 @@ fn debug_cfg(cfg: &Cfg) -> ! {
 }
 
 fn debug_register_mapping(cfg: &Cfg) -> ! {
-    let lv = compiler::LiveVariables::new(cfg);
+    let lv = analysis::live_variables(cfg);
     let ig = compiler::interference_graph(cfg, &lv);
     let rm = compiler::allocate_registers(ig);
     let mut rm: Vec<_> = rm.into_iter().collect();
@@ -93,7 +93,7 @@ fn debug_register_mapping(cfg: &Cfg) -> ! {
 }
 
 fn debug_liveness(cfg: &Cfg) -> ! {
-    let lv = compiler::LiveVariables::new(cfg);
+    let lv = analysis::live_variables(cfg);
     for n in cfg.node_indices() {
         println!("Node: {}", n.index());
         let mut v: Vec<_> = lv.internal_liveness(cfg, n).into_iter().collect();

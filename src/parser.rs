@@ -57,11 +57,11 @@ mod __parse__program {
         // State 3
         -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
         // State 4
-        -32, -32, -32, -32, -32, -32, -32, -32, -32, -32, -32, -32, -32, -32, -32, -32, -32, -32, -32,
+        -33, -33, -33, -33, -33, -33, -33, -33, -33, -33, -33, -33, -33, -33, -33, -33, -33, -33, -33,
         // State 5
         0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 9, 10, 11, 12, 13, 0, 0, 14, 0,
         // State 6
-        -24, -24, -24, -24, -24, -24, -24, -24, -24, -24, -24, -24, -24, -24, -24, -24, -24, -24, -24,
+        -25, -25, -25, -25, -25, -25, -25, -25, -25, -25, -25, -25, -25, -25, -25, -25, -25, -25, -25,
         // State 7
         0, 0, 0, 0, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 14, 0,
         // State 8
@@ -75,37 +75,37 @@ mod __parse__program {
         // State 12
         0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 9, 10, 11, 12, 13, 33, 0, 14, 0,
         // State 13
-        -11, -11, -11, -11, -11, -11, -11, -11, -11, -11, -11, -11, -11, -11, -11, -11, -11, -11, -11,
+        -12, -12, -12, -12, -12, -12, -12, -12, -12, -12, -12, -12, -12, -12, -12, -12, -12, -12, -12,
         // State 14
-        -14, -14, -14, -14, -14, -14, -14, -14, -14, -14, -14, -14, -14, -14, -14, -14, -14, -14, -14,
+        -15, -15, -15, -15, -15, -15, -15, -15, -15, -15, -15, -15, -15, -15, -15, -15, -15, -15, -15,
         // State 15
         27, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 28, 14, 29,
         // State 16
         35, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         // State 17
-        -33, -33, -33, -33, -33, -33, -33, -33, -33, -33, -33, -33, -33, -33, -33, -33, -33, -33, -33,
+        -34, -34, -34, -34, -34, -34, -34, -34, -34, -34, -34, -34, -34, -34, -34, -34, -34, -34, -34,
         // State 18
         0, 0, 0, 0, 0, 36, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         // State 19
-        -23, -23, -23, -23, -23, -23, -23, -23, -23, -23, -23, -23, -23, -23, -23, -23, -23, -23, -23,
+        -24, -24, -24, -24, -24, -24, -24, -24, -24, -24, -24, -24, -24, -24, -24, -24, -24, -24, -24,
         // State 20
         0, 0, 0, 0, 0, 0, 37, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         // State 21
         0, 0, 0, 38, 0, 39, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         // State 22
-        0, -8, 40, -8, 0, -8, 0, 0, 0, 0, 0, 0, 0, 0, -8, 0, 0, 0, 0,
+        0, -9, 40, -9, 0, -9, 0, 0, 0, 0, 0, 0, 0, 0, -9, 0, 0, 0, 0,
         // State 23
-        -39, -39, -39, -39, -39, -39, -39, -39, -39, -39, -39, -39, -39, -39, -39, -39, -39, -39, -39,
+        -40, -40, -40, -40, -40, -40, -40, -40, -40, -40, -40, -40, -40, -40, -40, -40, -40, -40, -40,
         // State 24
-        -38, -38, -38, -38, -38, -38, -38, -38, -38, -38, -38, -38, -38, -38, -38, -38, -38, -38, -38,
+        -39, -39, -39, -39, -39, -39, -39, -39, -39, -39, -39, -39, -39, -39, -39, -39, -39, -39, -39,
         // State 25
-        -10, -10, -10, -10, -10, -10, -10, -10, -10, -10, -10, -10, -10, -10, -10, -10, -10, -10, -10,
+        -11, -11, -11, -11, -11, -11, -11, -11, -11, -11, -11, -11, -11, -11, -11, -11, -11, -11, -11,
         // State 26
         27, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 28, 14, 29,
         // State 27
-        -17, -17, -17, -17, -17, -17, -17, -17, -17, -17, -17, -17, -17, -17, -17, -17, -17, -17, -17,
+        -18, -18, -18, -18, -18, -18, -18, -18, -18, -18, -18, -18, -18, -18, -18, -18, -18, -18, -18,
         // State 28
-        -37, -37, -37, -37, -37, -37, -37, -37, -37, -37, -37, -37, -37, -37, -37, -37, -37, -37, -37,
+        -38, -38, -38, -38, -38, -38, -38, -38, -38, -38, -38, -38, -38, -38, -38, -38, -38, -38, -38,
         // State 29
         0, 0, 0, 38, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 42, 0, 0, 0, 0,
         // State 30
@@ -113,19 +113,19 @@ mod __parse__program {
         // State 31
         0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 9, 10, 11, 12, 13, 44, 0, 14, 0,
         // State 32
-        -28, -28, -28, -28, -28, -28, -28, -28, -28, -28, -28, -28, -28, -28, -28, -28, -28, -28, -28,
+        -29, -29, -29, -29, -29, -29, -29, -29, -29, -29, -29, -29, -29, -29, -29, -29, -29, -29, -29,
         // State 33
         0, 0, 0, 38, 0, 45, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         // State 34
         27, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 28, 14, 29,
         // State 35
-        -22, -22, -22, -22, -22, -22, -22, -22, -22, -22, -22, -22, -22, -22, -22, -22, -22, -22, -22,
+        -23, -23, -23, -23, -23, -23, -23, -23, -23, -23, -23, -23, -23, -23, -23, -23, -23, -23, -23,
         // State 36
         27, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 28, 14, 29,
         // State 37
         27, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 28, 14, 29,
         // State 38
-        -21, -21, -21, -21, -21, -21, -21, -21, -21, -21, -21, -21, -21, -21, -21, -21, -21, -21, -21,
+        -22, -22, -22, -22, -22, -22, -22, -22, -22, -22, -22, -22, -22, -22, -22, -22, -22, -22, -22,
         // State 39
         27, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 28, 14, 29,
         // State 40
@@ -135,21 +135,21 @@ mod __parse__program {
         // State 42
         0, 55, 0, 38, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         // State 43
-        -29, -29, -29, -29, -29, -29, -29, -29, -29, -29, -29, -29, -29, -29, -29, -29, -29, -29, -29,
+        -30, -30, -30, -30, -30, -30, -30, -30, -30, -30, -30, -30, -30, -30, -30, -30, -30, -30, -30,
         // State 44
-        -27, -27, -27, -27, -27, -27, -27, -27, -27, -27, -27, -27, -27, -27, -27, -27, -27, -27, -27,
+        -28, -28, -28, -28, -28, -28, -28, -28, -28, -28, -28, -28, -28, -28, -28, -28, -28, -28, -28,
         // State 45
         0, 56, 0, 38, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         // State 46
         0, 0, 0, 38, 0, 57, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         // State 47
-        0, -7, 40, -7, 0, -7, 0, 0, 0, 0, 0, 0, 0, 0, -7, 0, 0, 0, 0,
+        0, -8, 40, -8, 0, -8, 0, 0, 0, 0, 0, 0, 0, 0, -8, 0, 0, 0, 0,
         // State 48
-        -9, -9, -9, -9, -9, -9, -9, -9, -9, -9, -9, -9, -9, -9, -9, -9, -9, -9, -9,
+        -10, -10, -10, -10, -10, -10, -10, -10, -10, -10, -10, -10, -10, -10, -10, -10, -10, -10, -10,
         // State 49
-        -40, -40, -40, -40, -40, -40, -40, -40, -40, -40, -40, -40, -40, -40, -40, -40, -40, -40, -40,
+        -41, -41, -41, -41, -41, -41, -41, -41, -41, -41, -41, -41, -41, -41, -41, -41, -41, -41, -41,
         // State 50
-        -5, -5, -5, -5, -5, -5, -5, -5, -5, -5, -5, -5, -5, -5, -5, -5, -5, -5, -5,
+        -6, -6, -6, -6, -6, -6, -6, -6, -6, -6, -6, -6, -6, -6, -6, -6, -6, -6, -6,
         // State 51
         0, 0, 0, 0, 0, 0, 0, 0, 53, 54, 0, 0, 0, 0, 0, 59, 0, 0, 0,
         // State 52
@@ -161,19 +161,19 @@ mod __parse__program {
         // State 55
         0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 9, 10, 11, 12, 13, 0, 0, 14, 0,
         // State 56
-        -20, -20, -20, -20, -20, -20, -20, -20, -20, -20, -20, -20, -20, -20, -20, -20, -20, -20, -20,
+        -21, -21, -21, -21, -21, -21, -21, -21, -21, -21, -21, -21, -21, -21, -21, -21, -21, -21, -21,
         // State 57
-        -6, -6, -6, -6, -6, -6, -6, -6, -6, -6, -6, -6, -6, -6, -6, -6, -6, -6, -6,
+        -7, -7, -7, -7, -7, -7, -7, -7, -7, -7, -7, -7, -7, -7, -7, -7, -7, -7, -7,
         // State 58
-        -36, -36, -36, -36, -36, -36, -36, -36, -36, -36, -36, -36, -36, -36, -36, -36, -36, -36, -36,
+        -37, -37, -37, -37, -37, -37, -37, -37, -37, -37, -37, -37, -37, -37, -37, -37, -37, -37, -37,
         // State 59
         0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         // State 60
-        0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 9, 10, 11, 12, 13, 0, 0, 14, 0,
+        0, 0, 0, 0, 0, 0, 0, 8, -5, -5, 9, 10, 11, 12, 13, -5, 0, 14, 0,
         // State 61
-        -26, -26, -26, -26, -26, -26, -26, -26, -26, -26, -26, -26, -26, -26, -26, -26, -26, -26, -26,
+        -27, -27, -27, -27, -27, -27, -27, -27, -27, -27, -27, -27, -27, -27, -27, -27, -27, -27, -27,
         // State 62
-        -25, -25, -25, -25, -25, -25, -25, -25, -25, -25, -25, -25, -25, -25, -25, -25, -25, -25, -25,
+        -26, -26, -26, -26, -26, -26, -26, -26, -26, -26, -26, -26, -26, -26, -26, -26, -26, -26, -26,
         // State 63
         0, 0, 0, 0, 0, 0, 0, 8, -3, -3, 9, 10, 11, 12, 13, -3, 0, 14, 0,
         // State 64
@@ -182,69 +182,69 @@ mod __parse__program {
         -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2,
     ];
     const __EOF_ACTION: &'static [i32] = &[
-        -18,
+        -19,
         0,
         0,
         -1,
-        -32,
-        -19,
+        -33,
+        -20,
+        -25,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        -12,
+        -15,
+        0,
+        0,
+        -34,
+        0,
         -24,
         0,
         0,
         0,
-        0,
-        0,
-        0,
+        -40,
+        -39,
         -11,
-        -14,
+        0,
+        -18,
+        -38,
         0,
         0,
-        -33,
+        0,
+        -29,
+        0,
         0,
         -23,
-        0,
-        0,
-        0,
-        -39,
-        -38,
-        -10,
-        0,
-        -17,
-        -37,
-        0,
-        0,
-        0,
-        -28,
         0,
         0,
         -22,
         0,
         0,
-        -21,
+        0,
+        0,
+        -30,
+        -28,
         0,
         0,
         0,
-        0,
-        -29,
-        -27,
-        0,
-        0,
-        0,
-        -9,
-        -40,
-        -5,
-        0,
-        0,
-        0,
-        0,
-        0,
-        -20,
+        -10,
+        -41,
         -6,
-        -36,
         0,
         0,
+        0,
+        0,
+        0,
+        -21,
+        -7,
+        -37,
+        0,
+        0,
+        -27,
         -26,
-        -25,
         0,
         -4,
         -2,
@@ -626,19 +626,31 @@ mod __parse__program {
                 1
             }
             4 => {
-                // case = "default", ":", statement => ActionFn(12);
+                // case = "default", ":", statement => ActionFn(45);
                 let __sym2 = __pop_Ntstatement(__symbols);
                 let __sym1 = __pop_Term_22_3a_22(__symbols);
                 let __sym0 = __pop_Term_22default_22(__symbols);
                 let __start = __sym0.0.clone();
                 let __end = __sym2.2.clone();
-                let __nt = super::__action12::<>(input, __sym0, __sym1, __sym2);
+                let __nt = super::__action45::<>(input, __sym0, __sym1, __sym2);
                 let __states_len = __states.len();
                 __states.truncate(__states_len - 3);
                 __symbols.push((__start, __Symbol::Ntcase(__nt), __end));
                 1
             }
             5 => {
+                // case = "default", ":" => ActionFn(46);
+                let __sym1 = __pop_Term_22_3a_22(__symbols);
+                let __sym0 = __pop_Term_22default_22(__symbols);
+                let __start = __sym0.0.clone();
+                let __end = __sym1.2.clone();
+                let __nt = super::__action46::<>(input, __sym0, __sym1);
+                let __states_len = __states.len();
+                __states.truncate(__states_len - 2);
+                __symbols.push((__start, __Symbol::Ntcase(__nt), __end));
+                1
+            }
+            6 => {
                 // case+ = case => ActionFn(25);
                 let __sym0 = __pop_Ntcase(__symbols);
                 let __start = __sym0.0.clone();
@@ -649,7 +661,7 @@ mod __parse__program {
                 __symbols.push((__start, __Symbol::Ntcase_2b(__nt), __end));
                 2
             }
-            6 => {
+            7 => {
                 // case+ = case+, case => ActionFn(26);
                 let __sym1 = __pop_Ntcase(__symbols);
                 let __sym0 = __pop_Ntcase_2b(__symbols);
@@ -661,7 +673,7 @@ mod __parse__program {
                 __symbols.push((__start, __Symbol::Ntcase_2b(__nt), __end));
                 2
             }
-            7 => {
+            8 => {
                 // expr = expr, "+", factor => ActionFn(13);
                 let __sym2 = __pop_Ntfactor(__symbols);
                 let __sym1 = __pop_Term_22_2b_22(__symbols);
@@ -674,7 +686,7 @@ mod __parse__program {
                 __symbols.push((__start, __Symbol::Ntexpr(__nt), __end));
                 3
             }
-            8 => {
+            9 => {
                 // expr = factor => ActionFn(14);
                 let __sym0 = __pop_Ntfactor(__symbols);
                 let __start = __sym0.0.clone();
@@ -685,7 +697,7 @@ mod __parse__program {
                 __symbols.push((__start, __Symbol::Ntexpr(__nt), __end));
                 3
             }
-            9 => {
+            10 => {
                 // factor = factor, "*", term => ActionFn(15);
                 let __sym2 = __pop_Ntterm(__symbols);
                 let __sym1 = __pop_Term_22_2a_22(__symbols);
@@ -698,7 +710,7 @@ mod __parse__program {
                 __symbols.push((__start, __Symbol::Ntfactor(__nt), __end));
                 4
             }
-            10 => {
+            11 => {
                 // factor = term => ActionFn(16);
                 let __sym0 = __pop_Ntterm(__symbols);
                 let __start = __sym0.0.clone();
@@ -709,7 +721,7 @@ mod __parse__program {
                 __symbols.push((__start, __Symbol::Ntfactor(__nt), __end));
                 4
             }
-            11 => {
+            12 => {
                 // ident = r#"[a-zA-Z_][a-zA-Z_0-9]*"# => ActionFn(22);
                 let __sym0 = __pop_Termr_23_22_5ba_2dzA_2dZ___5d_5ba_2dzA_2dZ__0_2d9_5d_2a_22_23(__symbols);
                 let __start = __sym0.0.clone();
@@ -720,7 +732,7 @@ mod __parse__program {
                 __symbols.push((__start, __Symbol::Ntident(__nt), __end));
                 5
             }
-            12 => {
+            13 => {
                 // ident? = ident => ActionFn(29);
                 let __sym0 = __pop_Ntident(__symbols);
                 let __start = __sym0.0.clone();
@@ -731,7 +743,7 @@ mod __parse__program {
                 __symbols.push((__start, __Symbol::Ntident_3f(__nt), __end));
                 6
             }
-            13 => {
+            14 => {
                 // ident? =  => ActionFn(30);
                 let __start = __symbols.last().map(|s| s.2.clone()).unwrap_or_default();
                 let __end = __lookahead_start.cloned().unwrap_or_else(|| __start.clone());
@@ -741,7 +753,7 @@ mod __parse__program {
                 __symbols.push((__start, __Symbol::Ntident_3f(__nt), __end));
                 6
             }
-            14 => {
+            15 => {
                 // label = ident, ":" => ActionFn(9);
                 let __sym1 = __pop_Term_22_3a_22(__symbols);
                 let __sym0 = __pop_Ntident(__symbols);
@@ -753,7 +765,7 @@ mod __parse__program {
                 __symbols.push((__start, __Symbol::Ntlabel(__nt), __end));
                 7
             }
-            15 => {
+            16 => {
                 // label? = label => ActionFn(27);
                 let __sym0 = __pop_Ntlabel(__symbols);
                 let __start = __sym0.0.clone();
@@ -764,7 +776,7 @@ mod __parse__program {
                 __symbols.push((__start, __Symbol::Ntlabel_3f(__nt), __end));
                 8
             }
-            16 => {
+            17 => {
                 // label? =  => ActionFn(28);
                 let __start = __symbols.last().map(|s| s.2.clone()).unwrap_or_default();
                 let __end = __lookahead_start.cloned().unwrap_or_else(|| __start.clone());
@@ -774,7 +786,7 @@ mod __parse__program {
                 __symbols.push((__start, __Symbol::Ntlabel_3f(__nt), __end));
                 8
             }
-            17 => {
+            18 => {
                 // num = r#"-?[0-9]+"# => ActionFn(21);
                 let __sym0 = __pop_Termr_23_22_2d_3f_5b0_2d9_5d_2b_22_23(__symbols);
                 let __start = __sym0.0.clone();
@@ -785,7 +797,7 @@ mod __parse__program {
                 __symbols.push((__start, __Symbol::Ntnum(__nt), __end));
                 9
             }
-            18 => {
+            19 => {
                 // program =  => ActionFn(39);
                 let __start = __symbols.last().map(|s| s.2.clone()).unwrap_or_default();
                 let __end = __lookahead_start.cloned().unwrap_or_else(|| __start.clone());
@@ -795,7 +807,7 @@ mod __parse__program {
                 __symbols.push((__start, __Symbol::Ntprogram(__nt), __end));
                 10
             }
-            19 => {
+            20 => {
                 // program = statement+ => ActionFn(40);
                 let __sym0 = __pop_Ntstatement_2b(__symbols);
                 let __start = __sym0.0.clone();
@@ -806,7 +818,7 @@ mod __parse__program {
                 __symbols.push((__start, __Symbol::Ntprogram(__nt), __end));
                 10
             }
-            20 => {
+            21 => {
                 // statement = "let ", ident, "=", expr, ";" => ActionFn(2);
                 let __sym4 = __pop_Term_22_3b_22(__symbols);
                 let __sym3 = __pop_Ntexpr(__symbols);
@@ -821,7 +833,7 @@ mod __parse__program {
                 __symbols.push((__start, __Symbol::Ntstatement(__nt), __end));
                 11
             }
-            21 => {
+            22 => {
                 // statement = "print ", expr, ";" => ActionFn(3);
                 let __sym2 = __pop_Term_22_3b_22(__symbols);
                 let __sym1 = __pop_Ntexpr(__symbols);
@@ -834,7 +846,7 @@ mod __parse__program {
                 __symbols.push((__start, __Symbol::Ntstatement(__nt), __end));
                 11
             }
-            22 => {
+            23 => {
                 // statement = "break", ident, ";" => ActionFn(35);
                 let __sym2 = __pop_Term_22_3b_22(__symbols);
                 let __sym1 = __pop_Ntident(__symbols);
@@ -847,7 +859,7 @@ mod __parse__program {
                 __symbols.push((__start, __Symbol::Ntstatement(__nt), __end));
                 11
             }
-            23 => {
+            24 => {
                 // statement = "break", ";" => ActionFn(36);
                 let __sym1 = __pop_Term_22_3b_22(__symbols);
                 let __sym0 = __pop_Term_22break_22(__symbols);
@@ -859,7 +871,7 @@ mod __parse__program {
                 __symbols.push((__start, __Symbol::Ntstatement(__nt), __end));
                 11
             }
-            24 => {
+            25 => {
                 // statement = switch => ActionFn(5);
                 let __sym0 = __pop_Ntswitch(__symbols);
                 let __start = __sym0.0.clone();
@@ -870,7 +882,7 @@ mod __parse__program {
                 __symbols.push((__start, __Symbol::Ntstatement(__nt), __end));
                 11
             }
-            25 => {
+            26 => {
                 // statement = label, "while", "(", expr, ")", statement => ActionFn(37);
                 let __sym5 = __pop_Ntstatement(__symbols);
                 let __sym4 = __pop_Term_22_29_22(__symbols);
@@ -886,7 +898,7 @@ mod __parse__program {
                 __symbols.push((__start, __Symbol::Ntstatement(__nt), __end));
                 11
             }
-            26 => {
+            27 => {
                 // statement = "while", "(", expr, ")", statement => ActionFn(38);
                 let __sym4 = __pop_Ntstatement(__symbols);
                 let __sym3 = __pop_Term_22_29_22(__symbols);
@@ -901,7 +913,7 @@ mod __parse__program {
                 __symbols.push((__start, __Symbol::Ntstatement(__nt), __end));
                 11
             }
-            27 => {
+            28 => {
                 // statement = ident, "=", expr, ";" => ActionFn(7);
                 let __sym3 = __pop_Term_22_3b_22(__symbols);
                 let __sym2 = __pop_Ntexpr(__symbols);
@@ -915,7 +927,7 @@ mod __parse__program {
                 __symbols.push((__start, __Symbol::Ntstatement(__nt), __end));
                 11
             }
-            28 => {
+            29 => {
                 // statement = "{", "}" => ActionFn(41);
                 let __sym1 = __pop_Term_22_7d_22(__symbols);
                 let __sym0 = __pop_Term_22_7b_22(__symbols);
@@ -927,7 +939,7 @@ mod __parse__program {
                 __symbols.push((__start, __Symbol::Ntstatement(__nt), __end));
                 11
             }
-            29 => {
+            30 => {
                 // statement = "{", statement+, "}" => ActionFn(42);
                 let __sym2 = __pop_Term_22_7d_22(__symbols);
                 let __sym1 = __pop_Ntstatement_2b(__symbols);
@@ -940,7 +952,7 @@ mod __parse__program {
                 __symbols.push((__start, __Symbol::Ntstatement(__nt), __end));
                 11
             }
-            30 => {
+            31 => {
                 // statement* =  => ActionFn(31);
                 let __start = __symbols.last().map(|s| s.2.clone()).unwrap_or_default();
                 let __end = __lookahead_start.cloned().unwrap_or_else(|| __start.clone());
@@ -950,7 +962,7 @@ mod __parse__program {
                 __symbols.push((__start, __Symbol::Ntstatement_2a(__nt), __end));
                 12
             }
-            31 => {
+            32 => {
                 // statement* = statement+ => ActionFn(32);
                 let __sym0 = __pop_Ntstatement_2b(__symbols);
                 let __start = __sym0.0.clone();
@@ -961,7 +973,7 @@ mod __parse__program {
                 __symbols.push((__start, __Symbol::Ntstatement_2a(__nt), __end));
                 12
             }
-            32 => {
+            33 => {
                 // statement+ = statement => ActionFn(33);
                 let __sym0 = __pop_Ntstatement(__symbols);
                 let __start = __sym0.0.clone();
@@ -972,7 +984,7 @@ mod __parse__program {
                 __symbols.push((__start, __Symbol::Ntstatement_2b(__nt), __end));
                 13
             }
-            33 => {
+            34 => {
                 // statement+ = statement+, statement => ActionFn(34);
                 let __sym1 = __pop_Ntstatement(__symbols);
                 let __sym0 = __pop_Ntstatement_2b(__symbols);
@@ -984,7 +996,7 @@ mod __parse__program {
                 __symbols.push((__start, __Symbol::Ntstatement_2b(__nt), __end));
                 13
             }
-            34 => {
+            35 => {
                 // statement? = statement => ActionFn(23);
                 let __sym0 = __pop_Ntstatement(__symbols);
                 let __start = __sym0.0.clone();
@@ -995,7 +1007,7 @@ mod __parse__program {
                 __symbols.push((__start, __Symbol::Ntstatement_3f(__nt), __end));
                 14
             }
-            35 => {
+            36 => {
                 // statement? =  => ActionFn(24);
                 let __start = __symbols.last().map(|s| s.2.clone()).unwrap_or_default();
                 let __end = __lookahead_start.cloned().unwrap_or_else(|| __start.clone());
@@ -1005,7 +1017,7 @@ mod __parse__program {
                 __symbols.push((__start, __Symbol::Ntstatement_3f(__nt), __end));
                 14
             }
-            36 => {
+            37 => {
                 // switch = "switch ", expr, "{", case+, "}" => ActionFn(10);
                 let __sym4 = __pop_Term_22_7d_22(__symbols);
                 let __sym3 = __pop_Ntcase_2b(__symbols);
@@ -1020,7 +1032,7 @@ mod __parse__program {
                 __symbols.push((__start, __Symbol::Ntswitch(__nt), __end));
                 15
             }
-            37 => {
+            38 => {
                 // term = r#"read\\(\\)"# => ActionFn(17);
                 let __sym0 = __pop_Termr_23_22read_5c_5c_28_5c_5c_29_22_23(__symbols);
                 let __start = __sym0.0.clone();
@@ -1031,7 +1043,7 @@ mod __parse__program {
                 __symbols.push((__start, __Symbol::Ntterm(__nt), __end));
                 16
             }
-            38 => {
+            39 => {
                 // term = num => ActionFn(18);
                 let __sym0 = __pop_Ntnum(__symbols);
                 let __start = __sym0.0.clone();
@@ -1042,7 +1054,7 @@ mod __parse__program {
                 __symbols.push((__start, __Symbol::Ntterm(__nt), __end));
                 16
             }
-            39 => {
+            40 => {
                 // term = ident => ActionFn(19);
                 let __sym0 = __pop_Ntident(__symbols);
                 let __start = __sym0.0.clone();
@@ -1053,7 +1065,7 @@ mod __parse__program {
                 __symbols.push((__start, __Symbol::Ntterm(__nt), __end));
                 16
             }
-            40 => {
+            41 => {
                 // term = "(", expr, ")" => ActionFn(20);
                 let __sym2 = __pop_Term_22_29_22(__symbols);
                 let __sym1 = __pop_Ntexpr(__symbols);
@@ -1709,7 +1721,7 @@ fn __action12<
     input: &'input str,
     (_, _, _): (usize, &'input str, usize),
     (_, _, _): (usize, &'input str, usize),
-    (_, s, _): (usize, Statement, usize),
+    (_, s, _): (usize, ::std::option::Option<Statement>, usize),
 ) -> Case
 {
     Case::Default(s)
@@ -2225,6 +2237,56 @@ fn __action44<
         __0,
         __1,
         __2,
+        __temp0,
+    )
+}
+
+#[allow(unused_variables)]
+fn __action45<
+    'input,
+>(
+    input: &'input str,
+    __0: (usize, &'input str, usize),
+    __1: (usize, &'input str, usize),
+    __2: (usize, Statement, usize),
+) -> Case
+{
+    let __start0 = __2.0.clone();
+    let __end0 = __2.2.clone();
+    let __temp0 = __action23(
+        input,
+        __2,
+    );
+    let __temp0 = (__start0, __temp0, __end0);
+    __action12(
+        input,
+        __0,
+        __1,
+        __temp0,
+    )
+}
+
+#[allow(unused_variables)]
+fn __action46<
+    'input,
+>(
+    input: &'input str,
+    __0: (usize, &'input str, usize),
+    __1: (usize, &'input str, usize),
+) -> Case
+{
+    let __start0 = __1.2.clone();
+    let __end0 = __1.2.clone();
+    let __temp0 = __action24(
+        input,
+        &__start0,
+        &__end0,
+    );
+    let __temp0 = (__start0, __temp0, __end0);
+    __action12(
+        input,
+        __0,
+        __1,
         __temp0,
     )
 }

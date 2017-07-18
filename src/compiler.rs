@@ -4,13 +4,19 @@ use itertools::*;
 use petgraph::prelude::{NodeIndex, Graph};
 use strum::IntoEnumIterator;
 
+use mrst;
+
 use ast::*;
 use self::Edge::Debug;
 use analysis;
 
+use std::borrow::Cow;
 use std::mem;
+use std::sync::atomic::*;
 use std::fmt::{self, Display, Formatter};
 use std::collections::{HashMap, HashSet};
+
+const JUMP_TABLE_ROW_SIZE: usize = 5;
 
 #[derive(Debug, Clone)]
 pub struct Block {
@@ -50,7 +56,7 @@ impl R {
 }
 
 fn fresh() -> R {
-    use std::sync::atomic::*;
+
     static COUNTER: AtomicUsize = ATOMIC_USIZE_INIT;
 
     R::R(COUNTER.fetch_add(1, Ordering::SeqCst) as u32)
@@ -75,6 +81,11 @@ pub enum Pinned {
     Rbp,
 }
 
+#[derive(PartialEq, Debug, Copy, Clone)]
+pub enum JumpType {
+    Near,
+}
+
 #[derive(PartialEq, Debug, Clone)]
 pub enum Inst {
     // a == b?
@@ -85,13 +96,18 @@ pub enum Inst {
     Add(R, R, R),
     Mult(R, R, R),
     Call(&'static str, usize),
-    Jmp(&'static str),
+    Jmp(Cow<'static, str>, Option<JumpType>),
+    //
+    Cjmp(R, NodeIndex),
+    Shr(R, R),
+    And(R, R, R),
 }
 
 #[derive(PartialEq, Debug, Clone, Copy)]
 pub enum Edge {
     True,
     False,
+    Table(usize),
     Debug(&'static str),
 }
 
@@ -119,14 +135,14 @@ pub fn compile(ast: &Program) -> Cfg {
         prev = Some(end);
     }
 
-    let exit = g.add_node(block(Inst::Jmp("exit")));
+    let exit = g.add_node(block(Inst::Jmp(Cow::Borrowed("exit"), None)));
     if let Some(prev) = prev {
         g.add_edge(prev, exit, Debug("top_exit"));
     }
 
     contract(&mut g);
     label_blocks(&mut g);
-    analysis::const_prop(&mut g);
+    // analysis::const_prop(&mut g);
 
     g
 }
@@ -160,6 +176,8 @@ pub fn codegen(mut g: Cfg) -> String {
     while let Some(n) = dfs.next(&g) {
         for ins in g[n].ins.iter_mut() {
             match ins {
+                &mut Inst::And(ref mut a, ref mut b, ref mut c) |
+                &mut Inst::Mult(ref mut a, ref mut b, ref mut c) |
                 &mut Inst::Add(ref mut a, ref mut b, ref mut c) => {
                     debug_assert!(!a.is_const());
                     if a.is_sym() {
@@ -180,6 +198,13 @@ pub fn codegen(mut g: Cfg) -> String {
                         *b = R::Pin(ra[b]);
                     }
                 }
+                &mut Inst::Cjmp(ref mut a, ..) => {
+                    debug_assert!(!a.is_const());
+                    if a.is_sym() {
+                        *a = R::Pin(ra[a]);
+                    }
+                }
+                &mut Inst::Shr(ref mut a, ref mut b) |
                 &mut Inst::Assign(ref mut a, ref mut b) => {
                     debug_assert!(!a.is_const());
                     if a.is_sym() {
@@ -187,18 +212,6 @@ pub fn codegen(mut g: Cfg) -> String {
                     }
                     if b.is_sym() {
                         *b = R::Pin(ra[b]);
-                    }
-                }
-                &mut Inst::Mult(ref mut a, ref mut b, ref mut c) => {
-                    debug_assert!(!a.is_const());
-                    if a.is_sym() {
-                        *a = R::Pin(ra[a]);
-                    }
-                    if b.is_sym() {
-                        *b = R::Pin(ra[b]);
-                    }
-                    if c.is_sym() {
-                        *c = R::Pin(ra[c]);
                     }
                 }
                 &mut Inst::Call(..) |
@@ -224,8 +237,6 @@ pub fn codegen(mut g: Cfg) -> String {
     let mut stack = vec![start];
     let mut visited = HashSet::new();
 
-    // visit blocks in depth first order.
-
     while let Some(n) = stack.pop() {
         if visited.contains(&n) {
             continue;
@@ -233,46 +244,77 @@ pub fn codegen(mut g: Cfg) -> String {
 
         visited.insert(n);
 
-        compile_bb(&g[n], &mut text);
+        compile_bb(&g, n, &mut text);
 
-        if let Some(&Inst::Test(a, b)) = g[n].ins.last() {
-            // cmp instruction was already emitted in compile_bb
-            // so now emit jump instruction
+        match g[n].ins.last() {
+            Some(&Inst::Test(mut a, mut b)) => {
+                assert_eq!(g.neighbors(n).count(), 2);
+                assert!(g.edges(n).all(|e| e.weight().is_true_false()));
+                let (mut near, mut far) = g.neighbors(n).next_tuple().unwrap();
 
-            assert_eq!(g.neighbors(n).count(), 2);
-            assert!(g.edges(n).all(|e| e.weight().is_true_false()));
-            let (mut near, mut far) = g.neighbors(n).next_tuple().unwrap();
+                // could be smarter about this, e.g. with some look ahead
+                // default heuristic: smaller block will be written next
+                if g[near].ins.len() > g[far].ins.len() {
+                    mem::swap(&mut near, &mut far);
+                }
 
-            // could be smarter about this, e.g. with some look ahead
-            // default heuristic: smaller block will be written next
-            if g[near].ins.len() > g[far].ins.len() {
-                mem::swap(&mut near, &mut far);
-            }
+                let cc = g[g.find_edge(n, far).unwrap()] == Edge::True;
 
-            let cc = g[g.find_edge(n, far).unwrap()] == Edge::True;
-
-            if a == b || a.is_const() && b.is_const() {
-                // only one branch can ever be taken
-                if cc == (a == b) {
-                    stack.push(far);
+                if a == b || a.is_const() && b.is_const() {
+                    // only one branch can ever be taken, so implicit branch there
+                    let next = if cc == (a == b) { far } else { near };
+                    stack.push(next);
                 } else {
+                    // only emit cmp here
+
+                    if a.is_const() {
+                        mem::swap(&mut a, &mut b);
+                    }
+
+                    debug_assert!(a.is_pinned());
+                    debug_assert!(!b.is_sym());
+                    text.line(format!("cmp {}, {}", a, b));
+
+                    let jmp = if cc { "je" } else { "jne" };
+                    let target = &g[far].label;
+                    text.line(format!("{} {}", jmp, target));
+
+                    stack.push(far);
                     stack.push(near);
                 }
-            } else {
-                let jmp = if cc { "je" } else { "jne" };
-                let target = &g[far].label;
-                text.line(format!("{} {}", jmp, target));
-
-                stack.push(far);
-                stack.push(near);
             }
-        } else {
-            assert!(g.neighbors(n).count() <= 1);
-            if let Some(n) = g.neighbors(n).next() {
-                stack.push(n);
-                if visited.contains(&n) {
-                    // back edge, must jump
-                    text.line(format!("jmp {}", g[n].label));
+
+            Some(&Inst::Cjmp(a, table_node)) => {
+                debug_assert_eq!(g.neighbors(n).count(), 1);
+                debug_assert_eq!(g.neighbors(n).next(), Some(table_node));
+                assert!(a.is_pinned());
+
+                let label = &g[table_node].label;
+
+                text.line(format!(
+                    "lea {0}, [{1} + {0} * {2}]",
+                    a,
+                    label,
+                    JUMP_TABLE_ROW_SIZE
+                ));
+                text.line(format!("jmp {}", a));
+
+                assert!(!visited.contains(&table_node));
+                visited.insert(table_node);
+
+                compile_bb(&g, table_node, &mut text);
+
+                stack.extend(g.neighbors(table_node));
+            }
+
+            _ => {
+                assert!(g.neighbors(n).count() <= 1);
+                if let Some(n) = g.neighbors(n).next() {
+                    stack.push(n);
+                    if visited.contains(&n) {
+                        // back edge, must jump
+                        text.line(format!("jmp {}", g[n].label));
+                    }
                 }
             }
         }
@@ -285,7 +327,8 @@ pub fn codegen(mut g: Cfg) -> String {
     p.into()
 }
 
-fn compile_bb(bb: &Block, asm: &mut StringBuilder) {
+fn compile_bb(g: &Cfg, idx: NodeIndex, asm: &mut StringBuilder) {
+    let bb = &g[idx];
     asm.label(&bb.label);
 
     for ins in &bb.ins {
@@ -312,6 +355,29 @@ fn compile_bb(bb: &Block, asm: &mut StringBuilder) {
 
                 asm.line(s);
             }
+            Inst::And(a, mut b, mut c) => {
+                debug_assert!(a.is_pinned());
+                if b.is_const() {
+                    mem::swap(&mut b, &mut c);
+                }
+                debug_assert!(!b.is_sym());
+                debug_assert!(!c.is_sym());
+
+                if a == b || a == c {
+                    if b != c {
+                        let r = if a == b { c } else { b };
+                        asm.line(format!("and {}, {}", a, r));
+                    }
+                } else {
+                    unimplemented!()
+                }
+            }
+            Inst::Shr(a, b) => {
+                debug_assert!(a.is_pinned());
+                debug_assert!(!b.is_sym());
+
+                asm.line(format!("shr {}, {}", a, b));
+            }
             Inst::Assign(a, b) => {
                 debug_assert!(a.is_pinned());
                 debug_assert!(!b.is_sym());
@@ -321,7 +387,13 @@ fn compile_bb(bb: &Block, asm: &mut StringBuilder) {
                 }
             }
             Inst::Call(s, _) => asm.line(format!("call {}", s)),
-            Inst::Jmp(s) => asm.line(format!("jmp {}", s)),
+            Inst::Jmp(ref s, t) => {
+                asm.line(format!(
+                    "jmp {} {}",
+                    t.map_or("".to_owned(), |jt| jt.to_string()),
+                    s
+                ))
+            }
             Inst::Mult(a, b, c) => {
                 debug_assert!(a.is_pinned());
                 debug_assert!(!b.is_sym());
@@ -329,15 +401,10 @@ fn compile_bb(bb: &Block, asm: &mut StringBuilder) {
                 asm.line(format!("lea {}, [{} * {}]", a, b, c));
             }
             Inst::Test(mut a, mut b) => {
-                if a.is_const() {
-                    if b.is_const() {
-                        continue;
-                    }
-                    mem::swap(&mut a, &mut b);
-                }
-                debug_assert!(a.is_pinned());
-                debug_assert!(!b.is_sym());
-                asm.line(format!("cmp {}, {}", a, b));
+                // defer
+            }
+            Inst::Cjmp(a, n) => {
+                // defer
             }
         }
     }
@@ -356,7 +423,9 @@ fn contract(g: &mut Cfg) {
                 .filter(|n| !visited.contains(n))
                 .next()
                 .unwrap();
-            if g.neighbors_directed(child, Direction::Incoming).count() > 1 {
+            if g.neighbors_directed(child, Direction::Incoming).count() > 1 ||
+                g[child].label != ""
+            {
                 break;
             }
 
@@ -414,7 +483,9 @@ fn label_blocks(g: &mut Cfg) {
 
     while let Some(i) = dfs.next(&*g) {
         g[i].idx = i;
-        g[i].label = format!("L{}", counter);
+        if g[i].label == "" {
+            g[i].label = format!("L{}", counter);
+        }
         counter += 1;
     }
 }
@@ -490,6 +561,7 @@ pub fn allocate_registers(mut ig: InterferenceGraph) -> HashMap<R, Pinned> {
 pub fn vars_read(ins: &Inst) -> HashSet<R> {
     let mut set = HashSet::new();
     match *ins {
+        Inst::And(_, a, b) |
         Inst::Add(_, a, b) |
         Inst::Mult(_, a, b) |
         Inst::Test(a, b) => {
@@ -500,6 +572,7 @@ pub fn vars_read(ins: &Inst) -> HashSet<R> {
                 set.insert(b);
             }
         }
+        Inst::Shr(_, b) |
         Inst::Assign(_, b) => {
             if !b.is_const() {
                 set.insert(b);
@@ -521,7 +594,12 @@ pub fn vars_read(ins: &Inst) -> HashSet<R> {
                     .map(R::Pin),
             );
         }
-        Inst::Jmp(_) => {}
+        Inst::Cjmp(a, _) => {
+            if !a.is_const() {
+                set.insert(a);
+            }
+        }
+        Inst::Jmp(..) => {}
     }
     set
 }
@@ -530,6 +608,9 @@ pub fn vars_written(ins: &Inst) -> HashSet<R> {
     let mut set = HashSet::new();
 
     match *ins {
+        Inst::Shr(r, ..) |
+        Inst::And(r, ..) |
+        Inst::Cjmp(r, ..) |
         Inst::Add(r, ..) |
         Inst::Assign(r, _) |
         Inst::Mult(r, ..) => {
@@ -556,172 +637,276 @@ fn c_statement(
     g: &mut Cfg,
 ) -> (NodeIndex, NodeIndex) {
 
-    fn c_stmt_inner(
-        stmt: &Statement,
-        names: &mut HashMap<String, R>,
-        label_exits: &mut HashMap<String, NodeIndex>,
-        g: &mut Cfg,
-        exit: Option<NodeIndex>,
-    ) -> (NodeIndex, NodeIndex, bool) {
-        match *stmt {
-            Statement::VarDecl(ref sym, ref e) => {
-                let r = fresh();
-                assert!(
-                    names.insert(sym.to_owned(), r).is_none(),
-                    "Cannot reuse variable name: {}",
-                    sym
-                );
-                let (node, b) = c_expr(e, g, names);
-                g[node].ins.push(Inst::Assign(r, b));
-                (node, node, false)
-            }
-            Statement::Print(ref e) => {
-                let (node, r) = c_expr(e, g, names);
-                g[node].ins.push(Inst::Assign(R::Pin(Pinned::Rdi), r));
-                g[node].ins.push(Inst::Call("print", 1));
-                (node, node, false)
-            }
-            Statement::Block(ref stmts) => {
-                let mut prev = None;
-
-                for stmt in stmts {
-                    let (n_begin, n_end, was_broke) =
-                        c_stmt_inner(stmt, names, label_exits, g, exit);
-
-                    if let Some((_, p_end)) = prev {
-                        g.add_edge(p_end, n_begin, Debug("block_next"));
-                    }
-
-                    prev = Some((prev.map_or(n_begin, |(b, _)| b), n_end));
-
-                    if was_broke {
-                        if let Some((b, pe)) = prev {
-                            return (b, pe, true);
-                        }
-                        unreachable!();
-                    }
-                }
-
-                prev.map_or_else(
-                    || {
-                        let i = g.add_node(empty_block());
-                        (i, i, false)
-                    },
-                    |(b, pe)| (b, pe, false),
-                )
-            }
-            Statement::Switch(Switch { ref arg, ref cases }) => {
-                let (node, arg_r) = c_expr(arg, g, names);
-                let exit = g.add_node(empty_block());
-
-                let mut prev = node;
-                let mut default = None;
-
-                let mut case_blocks = vec![];
-
-                for case in cases {
-                    match *case {
-                        Case::Case(..) => case_blocks.push(g.add_node(empty_block())),
-                        Case::Default(ref s) => {
-                            default = Some(s);
-                        }
-                    }
-                }
-
-                for ((i, block), case) in case_blocks.iter().cloned().enumerate().zip(cases) {
-                    match *case {
-                        Case::Case(v, ref s) => {
-                            let (guard_node, guard_r) = c_expr(&Expr::I64(v), g, names);
-                            let c_end = g.add_node(empty_block());
-                            g[guard_node].ins.push(Inst::Test(arg_r, guard_r));
-
-
-                            if let Some(ref s) = *s {
-                                let (begin, end, was_broke) =
-                                    c_stmt_inner(s, names, label_exits, g, Some(exit));
-
-                                g.add_edge(block, begin, Debug("case_block"));
-                                if !was_broke {
-                                    g.add_edge(end, c_end, Debug("case_end"));
-                                }
-                            } else {
-                                let n = if i + 1 < cases.len() {
-                                    case_blocks[i + 1]
-                                } else {
-                                    exit
-                                };
-                                g.add_edge(block, n, Debug("case_fallthrough"));
-                            }
-
-                            g.add_edge(guard_node, block, Edge::True);
-                            g.add_edge(guard_node, c_end, Edge::False);
-                            g.add_edge(prev, guard_node, Debug("switch_next"));
-
-                            prev = c_end;
-                        }
-                        _ => {}
-                    }
-                }
-
-                if let Some(s) = default {
-                    let (begin, end, _) = c_stmt_inner(s, names, label_exits, g, Some(exit));
-                    g.add_edge(prev, begin, Debug("switch_next_default"));
-                    prev = end;
-                }
-
-                // NOTE: weirdness with add_edge, possible bug somewhere
-                g.update_edge(prev, exit, Debug("switch_exit"));
-
-                (node, exit, false)
-            }
-            Statement::Break(ref s) => {
-                let exit = if let Some(ref label) = *s {
-                    label_exits[label]
-                } else {
-                    exit.unwrap()
-                };
-
-                let this = g.add_node(empty_block());
-                g.add_edge(this, exit, Debug("break"));
-                (this, this, true)
-            }
-            Statement::While(ref cond, ref body, ref label) => {
-                let (node, arg_r) = c_expr(cond, g, names);
-                let (guard_expr, guard_r) = c_expr(&Expr::I64(0), g, names);
-                let guard_ins = g.remove_node(guard_expr).unwrap().ins;
-                g[node].ins.extend(guard_ins);
-                g[node].ins.push(Inst::Test(arg_r, guard_r));
-
-                let exit = g.add_node(empty_block());
-
-                if let Some(ref label) = *label {
-                    assert!(label_exits.insert(label.clone(), exit).is_none());
-                }
-
-                let (begin, end, was_broke) = c_stmt_inner(body, names, label_exits, g, Some(exit));
-
-                g.add_edge(node, begin, Edge::False);
-                g.add_edge(node, exit, Edge::True);
-
-                if !was_broke {
-                    g.add_edge(end, node, Debug("loop"));
-                }
-
-                (node, exit, false)
-            }
-            Statement::Assignment(ref s, ref e) => {
-                let (node, r) = c_expr(e, g, names);
-                let reg = names[s];
-
-                g[node].ins.push(Inst::Assign(reg, r));
-                (node, node, false)
-            }
-        }
-    }
-
     let (a, b, _) = c_stmt_inner(stmt, names, label_exits, g, None);
     (a, b)
 }
+
+
+fn c_stmt_inner(
+    stmt: &Statement,
+    names: &mut HashMap<String, R>,
+    label_exits: &mut HashMap<String, NodeIndex>,
+    g: &mut Cfg,
+    exit: Option<NodeIndex>,
+        // First node, last node, whether or not to break out
+) -> (NodeIndex, NodeIndex, bool) {
+    match *stmt {
+        Statement::VarDecl(ref sym, ref e) => {
+            let r = fresh();
+            assert!(
+                names.insert(sym.to_owned(), r).is_none(),
+                "Cannot reuse variable name: {}",
+                sym
+            );
+            let (node, b) = c_expr(e, g, names);
+            g[node].ins.push(Inst::Assign(r, b));
+            (node, node, false)
+        }
+        Statement::Print(ref e) => {
+            let (node, r) = c_expr(e, g, names);
+            g[node].ins.push(Inst::Assign(R::Pin(Pinned::Rdi), r));
+            g[node].ins.push(Inst::Call("print", 1));
+            (node, node, false)
+        }
+        Statement::Block(ref stmts) => {
+            let mut prev = None;
+
+            for stmt in stmts {
+                let (n_begin, n_end, was_broke) = c_stmt_inner(stmt, names, label_exits, g, exit);
+
+                if let Some((_, p_end)) = prev {
+                    g.add_edge(p_end, n_begin, Debug("block_next"));
+                }
+
+                prev = Some((prev.map_or(n_begin, |(b, _)| b), n_end));
+
+                if was_broke {
+                    if let Some((b, pe)) = prev {
+                        return (b, pe, true);
+                    }
+                    unreachable!();
+                }
+            }
+
+            prev.map_or_else(
+                || {
+                    let i = g.add_node(empty_block());
+                    (i, i, false)
+                },
+                |(b, pe)| (b, pe, false),
+            )
+        }
+        Statement::Switch(Switch { ref arg, ref cases }) => {
+            /*
+
+                switch (x) {
+                    case 0: { thing0(); break; }
+                    case 1: { thing1(); break; }
+                    default: blah();
+                    case 2: thing2();
+                    case 4: { thing4(); break; }
+                }
+
+                // branch node
+                hash:
+                   jmp table + R0 * 5
+
+                table:
+                    jmp L0
+                    jmp L1
+                    jmp L2
+                    jmp exit // hole in table
+                    jmp L3
+
+                // TODO: make sure the ordering stays the same, at least for fallthrough intervals
+
+                // leaves
+                L0: thing0()
+                    jmp exit
+                L1: thing1()
+                    jmp exit
+                D0: blah()   // no break
+                L2: thing2() // no break
+                L3: thing3()
+                    jmp exit
+                exit:
+
+                 */
+            use mrst::{Tree, Marker, HashFn};
+            use mrst::methods::*;
+
+            let mut default = None;
+            let cases: Vec<(usize, &Statement)> = cases
+                .into_iter()
+                .filter_map(|c| match *c {
+                    Case::Case(v, ref st) => Some((v as usize, st.as_ref().unwrap())),
+                    Case::Default(ref st) => {
+                        default = Some(st);
+                        None
+                    }
+                })
+                .collect();
+
+            let (arg_block, arg_r) = c_expr(arg, g, names);
+            let exit = g.add_node(empty_block());
+
+            let tree = Tree::new(&*cases, &[&SubLow, &ShiftMask]);
+
+            let mut stack = vec![(&tree, (arg_block, exit))];
+
+            while let Some(state) = stack.pop() {
+                match state {
+                    (&Tree::Branch {
+                         ref children,
+                         ref hash_fn,
+                     },
+                     (_, exit)) => {
+                        let hash_r = fresh();
+
+                        let mut ins = vec![Inst::Assign(hash_r, arg_r)];
+                        let num_table_entries = match *hash_fn {
+                            HashFn::SubLow(f) => {
+                                if f.bias != 0 {
+                                    ins.push(Inst::Add(hash_r, hash_r, R::Const(-(f.bias as i64))));
+                                }
+                                f.max
+                            }
+                            HashFn::ShiftMask(Window { l, r }) => {
+                                let width = 1 + l - r;
+                                let mask = ((1 << width) - 1) as i64;
+                                if r != 0 {
+                                    ins.push(Inst::Shr(hash_r, R::Const(r as i64)));
+                                }
+                                if mask != -1 {
+                                    ins.push(Inst::And(hash_r, hash_r, R::Const(mask)));
+                                }
+                                1 << width
+                            }
+                            HashFn::ClzSub(f) => unimplemented!(),
+                        };
+
+                        let compute_jump = g.add_node(Block {
+                            ins,
+                            ..empty_block()
+                        });
+
+                        static CASE_ENTRY_LABEL_COUNTER: AtomicUsize = ATOMIC_USIZE_INIT;
+                        static TABLE_LABEL_COUNTER: AtomicUsize = ATOMIC_USIZE_INIT;
+
+                        let mut case_entry_blocks = vec![];
+                        let mut ins = vec![];
+
+                        for _ in 0..num_table_entries {
+                            let mut block = empty_block();
+                            let label_num = CASE_ENTRY_LABEL_COUNTER.fetch_add(1, Ordering::SeqCst);
+                            let label = format!("C_{}", label_num);
+
+                            ins.push(Inst::Jmp(Cow::Owned(label.clone()), Some(JumpType::Near)));
+
+                            block.label = label;
+
+                            case_entry_blocks.push(g.add_node(block));
+                        }
+
+                        let table_label_num = TABLE_LABEL_COUNTER.fetch_add(1, Ordering::SeqCst);
+
+                        let table = g.add_node(Block {
+                            ins,
+                            label: format!("T_{}", table_label_num),
+                            ..empty_block()
+                        });
+
+                        g[compute_jump].ins.push(Inst::Cjmp(hash_r, table));
+
+                        g.add_edge(arg_block, compute_jump, Debug("arg_to_hash"));
+                        g.add_edge(compute_jump, table, Debug("hash_to_table"));
+                        // let mut prev = None;
+
+                        for (i, (&entry_block, child)) in
+                            case_entry_blocks.iter().zip(children).enumerate()
+                        {
+                            g.add_edge(table, entry_block, Edge::Table(i));
+                            let end_block = g.add_node(empty_block());
+                            g.add_edge(end_block, exit, Debug("case_end_to_exit"));
+
+                            stack.push((child, ((entry_block, end_block))));
+
+                            // prev = Some();
+                        }
+                    }
+                    (&Tree::Leaf(ref marker), (entry_block, end_block)) => {
+                        match *marker {
+                            Marker::Case(val, ref st) => {
+                                // guard
+                                g[entry_block].ins.push(
+                                    Inst::Test(arg_r, R::Const(val as i64)),
+                                );
+                                g.add_edge(entry_block, end_block, Edge::False);
+
+                                let (body_begin, body_end, was_broke) =
+                                    c_stmt_inner(st, names, label_exits, g, Some(exit));
+
+                                // TODO: implemented fallthrough and remove this
+                                assert!(was_broke);
+
+                                g.add_edge(entry_block, body_begin, Edge::True);
+
+                                // TODO: if !was_broke {
+                                g.add_edge(body_end, end_block, Debug("body_end_to_case_end"));
+                            }
+                            Marker::Default => unimplemented!(),
+                        }
+                    }
+                }
+            }
+
+            (arg_block, exit, false)
+        }
+        Statement::Break(ref s) => {
+            let exit = if let Some(ref label) = *s {
+                label_exits[label]
+            } else {
+                exit.unwrap()
+            };
+
+            let this = g.add_node(empty_block());
+            // g.add_edge(this, exit, Debug("break"));
+            (this, this, true)
+        }
+        Statement::While(ref cond, ref body, ref label) => {
+            let (node, arg_r) = c_expr(cond, g, names);
+            let (guard_expr, guard_r) = c_expr(&Expr::I64(0), g, names);
+            let guard_ins = g.remove_node(guard_expr).unwrap().ins;
+            g[node].ins.extend(guard_ins);
+            g[node].ins.push(Inst::Test(arg_r, guard_r));
+
+            let exit = g.add_node(empty_block());
+
+            if let Some(ref label) = *label {
+                assert!(label_exits.insert(label.clone(), exit).is_none());
+            }
+
+            let (begin, end, was_broke) = c_stmt_inner(body, names, label_exits, g, Some(exit));
+
+            g.add_edge(node, begin, Edge::False);
+            g.add_edge(node, exit, Edge::True);
+
+            if !was_broke {
+                g.add_edge(end, node, Debug("loop"));
+            }
+
+            (node, exit, false)
+        }
+        Statement::Assignment(ref s, ref e) => {
+            let (node, r) = c_expr(e, g, names);
+            let reg = names[s];
+
+            g[node].ins.push(Inst::Assign(reg, r));
+            (node, node, false)
+        }
+    }
+}
+
 
 fn c_expr(e: &Expr, g: &mut Cfg, names: &HashMap<String, R>) -> (NodeIndex, R) {
     fn bin_op(
@@ -919,7 +1104,17 @@ impl Display for Edge {
         match *self {
             Edge::True => write!(f, "true"),
             Edge::False => write!(f, "false"),
+            Edge::Table(idx) => write!(f, "[{}]", idx),
             Edge::Debug(s) => write!(f, "{:?}", s),
+        }
+    }
+}
+
+
+impl Display for JumpType {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        match *self {
+            JumpType::Near => write!(f, "near"),
         }
     }
 }

@@ -25,7 +25,7 @@ pub enum Statement {
 #[derive(Debug)]
 pub enum Case {
     Case(i64, Option<Statement>),
-    Default(Statement),
+    Default(Option<Statement>),
 }
 
 #[derive(Debug)]
