@@ -173,7 +173,7 @@ pub fn const_prop(g: &mut Cfg) {
                     consts.remove(a);
                 }
                 // reading 2
-                &mut Inst::Test(ref mut a, ref mut b) => {
+                &mut Inst::Test(_, ref mut a, ref mut b) => {
                     if let R::Const(av) = *a {
                         consts.insert(*a, av);
                     } else if let Some(&val) = consts.get(a) {

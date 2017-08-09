@@ -86,10 +86,16 @@ pub enum JumpType {
     Near,
 }
 
+#[derive(PartialEq, Debug, Clone, Copy)]
+pub enum Cmp {
+    Eq,
+    Ge,
+    Le,
+}
+
 #[derive(PartialEq, Debug, Clone)]
 pub enum Inst {
-    // a == b?
-    Test(R, R),
+    Test(Cmp, R, R),
     // a = b
     Assign(R, R),
     // a = b + c
@@ -190,7 +196,7 @@ pub fn codegen(mut g: Cfg) -> String {
                         *c = R::Pin(ra[c]);
                     }
                 }
-                &mut Inst::Test(ref mut a, ref mut b) => {
+                &mut Inst::Test(_, ref mut a, ref mut b) => {
                     if a.is_sym() {
                         *a = R::Pin(ra[a]);
                     }
@@ -247,7 +253,7 @@ pub fn codegen(mut g: Cfg) -> String {
         compile_bb(&g, n, &mut text);
 
         match g[n].ins.last() {
-            Some(&Inst::Test(mut a, mut b)) => {
+            Some(&Inst::Test(cmp, mut a, mut b)) => {
                 assert_eq!(g.neighbors(n).count(), 2);
                 assert!(g.edges(n).all(|e| e.weight().is_true_false()));
                 let (mut near, mut far) = g.neighbors(n).next_tuple().unwrap();
@@ -275,7 +281,14 @@ pub fn codegen(mut g: Cfg) -> String {
                     debug_assert!(!b.is_sym());
                     text.line(format!("cmp {}, {}", a, b));
 
-                    let jmp = if cc { "je" } else { "jne" };
+                    // jcc codes and the negations
+                    let ccs = match cmp {
+                        Cmp::Eq => ["je", "jne"],
+                        Cmp::Ge => ["jge", "jl"],
+                        Cmp::Le => ["jle", "jg"],
+                    };
+
+                    let jmp = ccs[if cc { 0 } else { 1 }];
                     let target = &g[far].label;
                     text.line(format!("{} {}", jmp, target));
 
@@ -400,29 +413,29 @@ fn compile_bb(g: &Cfg, idx: NodeIndex, asm: &mut StringBuilder) {
                 debug_assert!(!c.is_sym());
                 asm.line(format!("lea {}, [{} * {}]", a, b, c));
             }
-            Inst::Test(mut a, mut b) => {
-                // defer
-            }
-            Inst::Cjmp(a, n) => {
+            Inst::Test(..) | Inst::Cjmp(..) => {
                 // defer
             }
         }
     }
 }
 
+// TODO: review
 fn contract(g: &mut Cfg) {
     let start = g.node_indices().next().unwrap();
     let mut stack = vec![start];
     let mut visited = HashSet::new();
 
     while let Some(i) = stack.pop() {
+        debug_assert!(!visited.contains(&i));
         visited.insert(i);
 
-        while g.neighbors(i).filter(|n| !visited.contains(n)).count() == 1 {
+        while g.neighbors(i)/*.filter(|n| !visited.contains(n))*/.count() == 1 {
             let child = g.neighbors(i)
-                .filter(|n| !visited.contains(n))
+                // .filter(|n| !visited.contains(n))
                 .next()
                 .unwrap();
+
             if g.neighbors_directed(child, Direction::Incoming).count() > 1 ||
                 g[child].label != ""
             {
@@ -451,7 +464,7 @@ fn contract(g: &mut Cfg) {
         let mut changed = false;
 
         g.retain_nodes(|g, i| {
-            if g[i].ins.is_empty() && g.neighbors(i).count() == 1 {
+            if g[i].ins.is_empty() && g.neighbors(i).count() == 1 && g[i].label == "" {
                 let target = g.neighbors(i).next().unwrap();
 
                 for n in g.neighbors_directed(i, Incoming) {
@@ -564,7 +577,7 @@ pub fn vars_read(ins: &Inst) -> HashSet<R> {
         Inst::And(_, a, b) |
         Inst::Add(_, a, b) |
         Inst::Mult(_, a, b) |
-        Inst::Test(a, b) => {
+        Inst::Test(_, a, b) => {
             if !a.is_const() {
                 set.insert(a);
             }
@@ -588,7 +601,7 @@ pub fn vars_read(ins: &Inst) -> HashSet<R> {
 
             // caller save regs
             set.extend(
-                [Rax, Rcx, Rdx, Rsi, Rdi, R8, R9, R10, R11]
+                [Rax, Rcx, Rdx, Rsi, Rdi, R8, R9, R10, R11, Rbp]
                     .iter()
                     .cloned()
                     .map(R::Pin),
@@ -619,7 +632,7 @@ pub fn vars_written(ins: &Inst) -> HashSet<R> {
         Inst::Call(..) => {
             use self::Pinned::*;
             set.extend(
-                [Rax, Rcx, Rdx, Rsi, Rdi, R8, R9, R10, R11]
+                [Rax, Rcx, Rdx, Rsi, Rdi, R8, R9, R10, R11, Rbp]
                     .iter()
                     .cloned()
                     .map(R::Pin),
@@ -697,51 +710,19 @@ fn c_stmt_inner(
             )
         }
         Statement::Switch(Switch { ref arg, ref cases }) => {
-            /*
-
-                switch (x) {
-                    case 0: { thing0(); break; }
-                    case 1: { thing1(); break; }
-                    default: blah();
-                    case 2: thing2();
-                    case 4: { thing4(); break; }
-                }
-
-                // branch node
-                hash:
-                   jmp table + R0 * 5
-
-                table:
-                    jmp L0
-                    jmp L1
-                    jmp L2
-                    jmp exit // hole in table
-                    jmp L3
-
-                // TODO: make sure the ordering stays the same, at least for fallthrough intervals
-
-                // leaves
-                L0: thing0()
-                    jmp exit
-                L1: thing1()
-                    jmp exit
-                D0: blah()   // no break
-                L2: thing2() // no break
-                L3: thing3()
-                    jmp exit
-                exit:
-
-                 */
             use mrst::{Tree, Marker, HashFn};
             use mrst::methods::*;
 
             let mut default = None;
-            let cases: Vec<(usize, &Statement)> = cases
+            // let mut next_case = HashMap::new();
+
+            let cases: Vec<(usize, Option<&Statement>)> = cases
                 .into_iter()
-                .filter_map(|c| match *c {
-                    Case::Case(v, ref st) => Some((v as usize, st.as_ref().unwrap())),
+                .enumerate()
+                .filter_map(|(i, c)| match *c {
+                    Case::Case(v, ref st) => Some((v as usize, st.as_ref())),
                     Case::Default(ref st) => {
-                        default = Some(st);
+                        default = Some((st, i));
                         None
                     }
                 })
@@ -750,9 +731,42 @@ fn c_stmt_inner(
             let (arg_block, arg_r) = c_expr(arg, g, names);
             let exit = g.add_node(empty_block());
 
+            let range_guard_block_lo = {
+                let ins = if cases.is_empty() {
+                    vec![]
+                } else {
+                    let min = cases.iter().map(|&(v, _)| v).min().unwrap();
+                    // if greater than or equal, success
+                    vec![Inst::Test(Cmp::Ge, arg_r, R::Const(min as i64))]
+                };
+
+                g.add_node(Block {
+                    ins,
+                    ..empty_block()
+                })
+            };
+
+            let range_guard_block_hi = {
+                let ins = if cases.is_empty() {
+                    vec![]
+                } else {
+                    let max = cases.iter().map(|&(v, _)| v).max().unwrap();
+                    // if less than or equal, success
+                    vec![Inst::Test(Cmp::Le, arg_r, R::Const(max as i64))]
+                };
+
+                g.add_node(Block {
+                    ins,
+                    ..empty_block()
+                })
+            };
+
+            let default_block = g.add_node(empty_block());
+
             let tree = Tree::new(&*cases, &[&SubLow, &ShiftMask]);
 
-            let mut stack = vec![(&tree, (arg_block, exit))];
+            // second exit is dummy val for next_entry_block
+            let mut stack = vec![(&tree, arg_block, exit, exit)];
 
             while let Some(state) = stack.pop() {
                 match state {
@@ -760,7 +774,9 @@ fn c_stmt_inner(
                          ref children,
                          ref hash_fn,
                      },
-                     (_, exit)) => {
+                     _,
+                     exit,
+                     _) => {
                         let hash_r = fresh();
 
                         let mut ins = vec![Inst::Assign(hash_r, arg_r)];
@@ -818,46 +834,116 @@ fn c_stmt_inner(
 
                         g[compute_jump].ins.push(Inst::Cjmp(hash_r, table));
 
-                        g.add_edge(arg_block, compute_jump, Debug("arg_to_hash"));
+                        let range_check_fail = if default.is_some() {
+                            default_block
+                        } else {
+                            exit
+                        };
+
+                        g.add_edge(arg_block, range_guard_block_lo, Debug("range_check"));
+
+                        g.add_edge(range_guard_block_lo, range_guard_block_hi, Edge::True);
+                        g.add_edge(range_guard_block_lo, range_check_fail, Edge::False);
+
+                        g.add_edge(range_guard_block_hi, compute_jump, Edge::True);
+                        g.add_edge(range_guard_block_hi, range_check_fail, Edge::False);
+
                         g.add_edge(compute_jump, table, Debug("hash_to_table"));
-                        // let mut prev = None;
 
                         for (i, (&entry_block, child)) in
                             case_entry_blocks.iter().zip(children).enumerate()
                         {
                             g.add_edge(table, entry_block, Edge::Table(i));
+
                             let end_block = g.add_node(empty_block());
-                            g.add_edge(end_block, exit, Debug("case_end_to_exit"));
 
-                            stack.push((child, ((entry_block, end_block))));
+                            let next_entry_block = if i + 1 < case_entry_blocks.len() {
+                                case_entry_blocks[i + 1]
+                            } else {
+                                exit
+                            };
 
-                            // prev = Some();
+                            stack.push((child, entry_block, end_block, next_entry_block));
                         }
                     }
-                    (&Tree::Leaf(ref marker), (entry_block, end_block)) => {
+                    (&Tree::Leaf(ref marker), entry_block, end_block, next_entry_block) => {
                         match *marker {
-                            Marker::Case(val, ref st) => {
-                                // guard
-                                g[entry_block].ins.push(
-                                    Inst::Test(arg_r, R::Const(val as i64)),
-                                );
-                                g.add_edge(entry_block, end_block, Edge::False);
+                            Marker::Case(val, st) => {
+                                if let Some(ref st) = st {
+                                    // guard
+                                    g[entry_block].ins.push(Inst::Test(
+                                        Cmp::Eq,
+                                        arg_r,
+                                        R::Const(val as i64),
+                                    ));
 
-                                let (body_begin, body_end, was_broke) =
-                                    c_stmt_inner(st, names, label_exits, g, Some(exit));
+                                    let (body_begin, body_end, was_broke) =
+                                        c_stmt_inner(st, names, label_exits, g, Some(exit));
 
-                                // TODO: implemented fallthrough and remove this
-                                assert!(was_broke);
+                                    g.add_edge(entry_block, body_begin, Edge::True);
+                                    g.add_edge(entry_block, default_block, Edge::False);
+                                    g.add_edge(body_end, end_block, Debug("body_end_to_case_end"));
 
-                                g.add_edge(entry_block, body_begin, Edge::True);
+                                    let target = if was_broke {
+                                        exit
+                                    } else {
+                                        unimplemented!();
+                                        next_entry_block
+                                    };
 
-                                // TODO: if !was_broke {
-                                g.add_edge(body_end, end_block, Debug("body_end_to_case_end"));
+                                    g.add_edge(end_block, target, Debug("case_end"));
+                                } else {
+                                    g.add_edge(entry_block, end_block, Debug("empty_case"));
+                                }
                             }
-                            Marker::Default => unimplemented!(),
+                            Marker::Default => {
+                                let msg = if let Some((ost, _)) = default {
+                                    if let Some(st) = ost.as_ref() {
+                                        Debug("default_case")
+                                    } else {
+                                        // empty default case, has fallthrough
+                                        Debug("empty_default_case")
+                                    }
+                                } else {
+                                    // no explicit default case,
+                                    // this leaf is just a hole in the table
+                                    Debug("hole")
+                                };
+
+                                g.add_edge(entry_block, end_block, msg);
+                                g.add_edge(end_block, default_block, Debug("default_case_end"));
+                            }
                         }
                     }
                 }
+            }
+
+            if let Some((st, i)) = default {
+                // let entry_block = case_entry_blocks[i];
+                // let end_block = case_end_blocks[i];
+                let end_block = g.add_node(empty_block());
+
+                let target = if let Some(st) = st.as_ref() {
+                    let (body_begin, body_end, was_broke) =
+                        c_stmt_inner(st, names, label_exits, g, Some(exit));
+
+                    g.add_edge(default_block, body_begin, Debug("default_block_entry"));
+                    g.add_edge(body_end, end_block, Debug("default_end"));
+
+                    if was_broke {
+                        exit
+                    } else {
+                        // fallthrough
+                        unimplemented!()
+                    }
+                } else {
+                    // fallthrough
+                    unimplemented!()
+                };
+
+                g.add_edge(end_block, target, Debug("default_block_end"));
+            } else {
+                g.add_edge(default_block, exit, Debug("no_default_exit"));
             }
 
             (arg_block, exit, false)
@@ -878,7 +964,7 @@ fn c_stmt_inner(
             let (guard_expr, guard_r) = c_expr(&Expr::I64(0), g, names);
             let guard_ins = g.remove_node(guard_expr).unwrap().ins;
             g[node].ins.extend(guard_ins);
-            g[node].ins.push(Inst::Test(arg_r, guard_r));
+            g[node].ins.push(Inst::Test(Cmp::Eq, arg_r, guard_r));
 
             let exit = g.add_node(empty_block());
 

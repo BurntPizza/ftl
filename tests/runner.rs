@@ -71,14 +71,12 @@ fn main() {
             .wait()
             .unwrap();
 
-        fs::remove_file(object_file_path).unwrap();
         assert!(status.success());
 
         let output = process::Command::new(&exec_file_path).output().expect(
             "failed to run test program",
         );
 
-        fs::remove_file(exec_file_path).unwrap();
         assert!(output.status.success());
 
         let output = std::str::from_utf8(&*output.stdout)
@@ -87,6 +85,8 @@ fn main() {
             .replace("\n", " ");
         assert_eq!(output, expected_str);
 
+        fs::remove_file(exec_file_path).unwrap();
+        fs::remove_file(object_file_path).unwrap();
         fs::remove_file(asm_file_path).unwrap();
     }
 }
